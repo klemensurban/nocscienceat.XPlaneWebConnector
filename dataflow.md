@@ -38,12 +38,12 @@ A third interface (`IXPlaneAvailabilityCheck`) handles startup sequencing — wa
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                        Consumer Application                        │
+│                        Consumer Application                         │
 │                                                                     │
-│  ┌──────────────┐  ┌───────────────────┐  ┌─────────────────────┐  │
+│  ┌───────────────┐  ┌───────────────────┐  ┌─────────────────────┐  │
 │  │ Panel Handler │  │ Hosted Service    │  │ Custom Components   │  │
 │  │ (hardware I/O)│  │ (lifecycle mgmt)  │  │ (your code)         │  │
-│  └──────────────┘  └───────────────────┘  └─────────────────────┘  │
+│  └───────────────┘  └───────────────────┘  └─────────────────────┘  │
 │         │                   │                        │              │
 │         └───────────────────┼────────────────────────┘              │
 │                             │                                       │
@@ -55,7 +55,7 @@ A third interface (`IXPlaneAvailabilityCheck`) handles startup sequencing — wa
 │                └─────────────────────────┘                          │
 └─────────────────────────────────────────────────────────────────────┘
                               │
-              ┌───────────────┼───────────────┐
+              ┌───────────────┼────────────────┐
               │ HTTP (REST)   │ WebSocket      │
               │               │                │
               │               │                │
@@ -74,28 +74,28 @@ A third interface (`IXPlaneAvailabilityCheck`) handles startup sequencing — wa
 The three interfaces are implemented by a single class (`XPlaneWebConnector`) but serve different roles:
 
 ```
-                    ┌──────────────────────────────┐
+                    ┌───────────────────────────────┐
                     │      XPlaneWebConnector       │
                     │   (sealed partial class)      │
-                    ├──────────────────────────────┤
+                    ├───────────────────────────────┤
                     │ implements:                   │
                     │  • IXPlaneWebConnector        │
                     │  • IXPlaneApi                 │
                     │  • IXPlaneAvailabilityCheck   │
                     │  • IDisposable                │
-                    └──────────────────────────────┘
+                    └───────────────────────────────┘
 
- ┌─────────────────────────┐  ┌────────────────────────┐  ┌──────────────────────────┐
- │  IXPlaneWebConnector    │  │   IXPlaneApi            │  │ IXPlaneAvailabilityCheck │
- │  (high-level)           │  │   (low-level)           │  │ (startup)                │
- ├─────────────────────────┤  ├────────────────────────┤  ├──────────────────────────┤
- │ Start()                 │  │ GetCapabilitiesAsync()  │  │ IsAvailableAsync()       │
- │ StopAsync()             │  │ ListDataRefsAsync()     │  │ WaitUntilAvailableAsync()│
- │ SubscribeAsync()        │  │ GetDataRefCountAsync()  │  │ ConnectionClosed event   │
- │ SetDataRefValueAsync()  │  │ GetDataRefValueAsync()  │  └──────────────────────────┘
- │ SendCommandAsync()      │  │ SetDataRefValueByIdAs() │
- │ Dispose()               │  │ SetDataRefValuesByWs()  │
- └─────────────────────────┘  │ ListCommandsAsync()     │
+ ┌─────────────────────────┐  ┌──────────────────────────┐  ┌──────────────────────────┐
+ │  IXPlaneWebConnector    │  │   IXPlaneApi             │  │ IXPlaneAvailabilityCheck │
+ │  (high-level)           │  │   (low-level)            │  │ (startup)                │
+ ├─────────────────────────┤  ├──────────────────────────┤  ├──────────────────────────┤
+ │ Start()                 │  │ GetCapabilitiesAsync()   │  │ IsAvailableAsync()       │
+ │ StopAsync()             │  │ ListDataRefsAsync()      │  │ WaitUntilAvailableAsync()│
+ │ SubscribeAsync()        │  │ GetDataRefCountAsync()   │  │ ConnectionClosed event   │
+ │ SetDataRefValueAsync()  │  │ GetDataRefValueAsync()   │  └──────────────────────────┘
+ │ SendCommandAsync()      │  │ SetDataRefValueByIdAs()  │
+ │ Dispose()               │  │ SetDataRefValuesByWs()   │
+ └─────────────────────────┘  │ ListCommandsAsync()      │
                               │ GetCommandCountAsync()   │
                               │ ActivateCommandAsync()   │
                               │ StartFlightAsync()       │
@@ -105,7 +105,7 @@ The three interfaces are implemented by a single class (`XPlaneWebConnector`) bu
                               │ UnsubscribeAllDataRefs() │
                               │ Subscribe/Unsub CmdUpd() │
                               │ SetCommandActiveAsync()  │
-                              └────────────────────────┘
+                              └──────────────────────────┘
 ```
 
 ### When to use which interface
@@ -168,11 +168,11 @@ Consumer                        Library                          X-Plane
    │  WaitUntilAvailableAsync()    │                               │
    │──────────────────────────────>│                               │
    │                               │───── GET /api/capabilities ──>│
-   │                               │<──── 200 OK ─────────────────│
+   │                               │<──── 200 OK ──────────────────│
    │                               │                               │
    │                               │  (Phase 2: readiness probe)   │
    │                               │───── GET /datarefs?filter ───>│
-   │                               │<──── { data: [{id: ...}] } ──│
+   │                               │<──── { data: [{id: ...}] } ───│
    │                               │                               │
    │  Start()                      │                               │
    │──────────────────────────────>│  Creates CancellationToken    │
@@ -180,11 +180,11 @@ Consumer                        Library                          X-Plane
    │                               │   ConnectWebSocketAndReceive  │
    │                               │    └─ ProcessIncomingMessages │
    │                               │                               │
-   │                               │──── ws:// CONNECT ──────────>│
-   │                               │<── WebSocket OPEN ───────────│
+   │                               │──── ws:// CONNECT ───────────>│
+   │                               │<── WebSocket OPEN ────────────│
    │                               │                               │
    │  SubscribeAsync(dataref, cb)  │                               │
-   │──────────────────────────────>│  (see §5 and §7 for details) │
+   │──────────────────────────────>│  (see §5 and §7 for details)  │
    │                               │                               │
 ```
 
@@ -199,8 +199,8 @@ Consumer                        Library                          X-Plane
    │                               │  await _receiveTask           │
    │                               │    (with timeout)             │
    │                               │                               │
-   │                               │──── ws:// CLOSE ────────────>│
-   │                               │<── CLOSE ACK ────────────────│
+   │                               │──── ws:// CLOSE ─────────────>│
+   │                               │<── CLOSE ACK ─────────────────│
    │                               │                               │
    │                               │  Clear subscriptions          │
    │                               │  Clear caches                 │
@@ -217,7 +217,7 @@ When X-Plane exits or closes the WebSocket:
 ```
 X-Plane                          Library                       Consumer
    │                               │                               │
-   │──── WebSocket CLOSE ────────>│                               │
+   │──── WebSocket CLOSE ─────────>│                               │
    │                               │  ReceiveLoopAsync detects     │
    │                               │  MessageType.Close            │
    │                               │                               │
@@ -249,8 +249,8 @@ Consumer                         Library                                      X-
    │                                │  └─ cache miss:                            │
    │                                │     GET /api/v3/datarefs                   │
    │                                │       ?filter[name]=AirbusFBW/Foo          │
-   │                                │       &fields=id,name ─────────────────>│
-   │                                │     ← { data: [{ id: 42 }] } ──────────│
+   │                                │       &fields=id,name ────────────────────>│
+   │                                │     ← { data: [{ id: 42 }] } ──────────────│
    │                                │     cache[path] = 42                       │
    │                                │                                            │
    │                                │  _subscriptions[(42, 7)] = (dataref, cb)   │
@@ -282,7 +282,7 @@ Consumer                                 Library                          X-Plan
    │                                        │           { id: 42,            │
    │                                        │             value: 1.0,        │
    │                                        │             index: 3 }         │
-   │                                        │         ]}} ────────────────>│
+   │                                        │         ]}} ──────────────────>│
    │                                        │                                │
 ```
 
@@ -305,46 +305,46 @@ Consumer                                Library                          X-Plane
    │                                       │           { id: 100,           │
    │                                       │             is_active: true,   │
    │                                       │             duration: 0 }      │
-   │                                       │         ]}} ────────────────>│
+   │                                       │         ]}} ──────────────────>│
    │                                       │                                │
 ```
 
 ### 5.4 Outbound Summary
 
 ```
-                         ┌──────────────────────────────────────────────┐
-                         │          Outbound Data Paths                 │
-                         ├──────────────────────────────────────────────┤
-                         │                                              │
-Consumer ──> IXPlaneWebConnector                                       │
-  │          │                                                          │
-  │          ├── SubscribeAsync()                                       │
-  │          │     ├─ ResolveDataRefIdAsync() ──── REST GET ──> X-Plane │
-  │          │     └─ SendDataRefSubscribeAsync() ── WS ──────> X-Plane │
-  │          │                                                          │
-  │          ├── SetDataRefValueAsync()                                 │
-  │          │     ├─ ResolveDataRefIdAsync() ──── REST GET ──> X-Plane │
-  │          │     └─ SetDataRefValuesByWsAsync() ── WS ──────> X-Plane │
-  │          │                                                          │
-  │          └── SendCommandAsync()                                     │
-  │                ├─ ResolveCommandIdAsync() ──── REST GET ──> X-Plane │
-  │                └─ SetCommandActiveAsync() ───── WS ────────> X-Plane│
-  │                                                                     │
-Consumer ──> IXPlaneApi                                                 │
-  │          │                                                          │
-  │          ├── ListDataRefsAsync() ──────────── REST GET ──> X-Plane  │
-  │          ├── SetDataRefValueByIdAsync() ──── REST PATCH ──> X-Plane │
-  │          ├── SetDataRefValuesByWsAsync() ────── WS ──────> X-Plane  │
-  │          ├── ActivateCommandAsync() ──────── REST POST ──> X-Plane  │
-  │          ├── SetCommandActiveAsync() ────────── WS ──────> X-Plane  │
-  │          ├── StartFlightAsync() ──────────── REST POST ──> X-Plane  │
-  │          └── UpdateFlightAsync() ─────────── REST PATCH ──> X-Plane │
-  │                                                                     │
-  └─ All WebSocket sends go through SendWebSocketFireAndForgetAsync()   │
-     → JSON serialize with source-generated context                     │
-     → ClientWebSocket.SendAsync()                                      │
-     → No acknowledgement waiting                                       │
-                         └──────────────────────────────────────────────┘
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │                    Outbound Data Paths                                  │
+  ├─────────────────────────────────────────────────────────────────────────┤
+  │                                                                         │
+  │ Consumer ──> IXPlaneWebConnector                                        │
+  │              │                                                          │
+  │              ├── SubscribeAsync()                                       │
+  │              │     ├─ ResolveDataRefIdAsync() ──── REST GET ──> X-Plane │
+  │              │     └─ SendDataRefSubscribeAsync() ── WS ──────> X-Plane │
+  │              │                                                          │
+  │              ├── SetDataRefValueAsync()                                 │
+  │              │     ├─ ResolveDataRefIdAsync() ──── REST GET ──> X-Plane │
+  │              │     └─ SetDataRefValuesByWsAsync() ── WS ──────> X-Plane │
+  │              │                                                          │
+  │              └── SendCommandAsync()                                     │
+  │                    ├─ ResolveCommandIdAsync() ──── REST GET ──> X-Plane │
+  │                    └─ SetCommandActiveAsync() ───── WS ───────> X-Plane │
+  │                                                                         │
+  │ Consumer ──> IXPlaneApi                                                 │
+  │              │                                                          │
+  │              ├── ListDataRefsAsync() ─────────── REST GET ────> X-Plane │
+  │              ├── SetDataRefValueByIdAsync() ──── REST PATCH ──> X-Plane │
+  │              ├── SetDataRefValuesByWsAsync() ─── WS ──────────> X-Plane │
+  │              ├── ActivateCommandAsync() ──────── REST POST ───> X-Plane │
+  │              ├── SetCommandActiveAsync() ─────── WS ──────────> X-Plane │
+  │              ├── StartFlightAsync() ──────────── REST POST ──> X-Plane  │
+  │              └── UpdateFlightAsync() ─────────── REST PATCH ──> X-Plane │
+  │                                                                         │
+  │      All WebSocket sends go through SendWebSocketFireAndForgetAsync()   │
+  │       → JSON serialize with source-generated context                    │
+  │       → ClientWebSocket.SendAsync()                                     │
+  │       → No acknowledgement waiting                                      │
+  └─────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -358,7 +358,7 @@ Inbound data arrives exclusively via WebSocket. The library uses a **two-stage p
 ```
 X-Plane                    Library                                      Consumer
    │                          │                                            │
-   │  WS frame               │                                            │
+   │  WS frame                │                                            │
    │  (dataref_update_values) │                                            │
    │─────────────────────────>│                                            │
    │                          │                                            │
@@ -375,7 +375,7 @@ X-Plane                    Library                                      Consumer
    │                          │                 │                          │
    │                          │                 ▼                          │
    │                          │  ┌──────────────────────────────────┐      │
-   │                          │  │ Channel<byte[]> (capacity: 50)  │      │
+   │                          │  │ Channel<byte[]> (capacity: 50)   │      │
    │                          │  │ BoundedChannelFullMode.DropOldest│      │
    │                          │  │ SingleReader = true              │      │
    │                          │  └──────────────────────────────────┘      │
@@ -392,7 +392,7 @@ X-Plane                    Library                                      Consumer
    │                          │  └─────────────────────────────────────┘   │
    │                          │                        │                   │
    │                          │                        ▼                   │
-   │                          │            callback(SimDataRef, float) ──>│
+   │                          │            callback(SimDataRef, float) ───>│
    │                          │                                            │
 ```
 
@@ -450,8 +450,8 @@ Example: Consumer subscribes to indices [3, 7, 1]
   X-Plane sends:  { "42": [0.5, 1.2, 3.4] }
                             ^    ^    ^
                             │    │    └── position 2 → index 7
-                            │    └────── position 1 → index 3
-                            └─────────── position 0 → index 1
+                            │    └─────── position 1 → index 3
+                            └──────────── position 0 → index 1
 
   Dispatch:
     _subscriptions[(42, 1)].Callback(element, 0.5)
@@ -748,7 +748,7 @@ X-Plane                   Library                 OvhPanelHandler              H
 ```
 Hardware              OvhPanelHandler               Library                    X-Plane
    │                         │                         │                          │
-   │ Serial: "K02,1;"       │                         │                          │
+   │ Serial: "K02,1;"        │                         │                          │
    │────────────────────────>│                         │                          │
    │                         │ SerialPort.DataReceived │                          │
    │                         │ → ProcessReceivedData   │                          │
@@ -770,7 +770,7 @@ Hardware              OvhPanelHandler               Library                    X
    │                         │                         │ { id: 100,               │
    │                         │                         │   is_active: true,       │
    │                         │                         │   duration: 0 }          │
-   │                         │                         │────────────────────────>│
+   │                         │                         │─────────────────────────>│
    │                         │                         │                   APU ON │
 ```
 
@@ -786,25 +786,25 @@ Program.cs                PanelHostedService       XPlaneWebConnector      OvhPa
    │                           │ WaitUntilAvailable()   │                       │
    │                           │───────────────────────>│                       │
    │                           │                        │──── REST polls ──> X-Plane
-   │                           │                        │<─── 200 OK ──────│
-   │                           │<──────────────────────│                       │
+   │                           │                        │<─── 200 OK ───────────│
+   │                           │<───────────────────────│                       │
    │                           │                        │                       │
    │                           │ connector.Start()      │                       │
    │                           │───────────────────────>│                       │
    │                           │                        │──── WS connect ──> X-Plane
    │                           │                        │                       │
    │                           │ panel.ConnectAsync()   │                       │
-   │                           │──────────────────────────────────────────────>│
+   │                           │───────────────────────────────────────────────>│
    │                           │                        │                       │
-   │                           │                        │       SerialPort.Open()│
+   │                           │                        │      SerialPort.Open()│
    │                           │                        │                       │
-   │                           │                        │  SubscribeToDataRefs() │
+   │                           │                        │ SubscribeToDataRefs() │
    │                           │                        │<──────────────────────│
-   │                           │                        │ (50+ SubscribeAsync    │
-   │                           │                        │  calls with callbacks) │
+   │                           │                        │ (50+ SubscribeAsync   │
+   │                           │                        │ calls with callbacks) │
    │                           │                        │                       │
-   │                           │                        │──── REST resolve IDs ──>│
-   │                           │                        │──── WS subscribe ──────>│
+   │                           │                        │─── REST resolve IDs ─>│
+   │                           │                        │─── WS subscribe ─────>│
    │                           │                        │                       │
    │                           │ "All panels init'd"    │                       │
    │                           │                        │                       │
