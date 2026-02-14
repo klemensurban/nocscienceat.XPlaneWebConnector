@@ -10,8 +10,8 @@ This document provides a detailed description of the internal data flows, thread
 2. [Interface Layering](#2-interface-layering)
 3. [Type System](#3-type-system)
 4. [Lifecycle & Connection Management](#4-lifecycle--connection-management)
-5. [Outbound Dataflow: Consumer ? X-Plane](#5-outbound-dataflow-consumer--x-plane)
-6. [Inbound Dataflow: X-Plane ? Consumer](#6-inbound-dataflow-x-plane--consumer)
+5. [Outbound Dataflow: Consumer → X-Plane](#5-outbound-dataflow-consumer--x-plane)
+6. [Inbound Dataflow: X-Plane → Consumer](#6-inbound-dataflow-x-plane--consumer)
 7. [ID Resolution & Caching](#7-id-resolution--caching)
 8. [Threading Model & Concurrency](#8-threading-model--concurrency)
 9. [WebSocket Protocol Details](#9-websocket-protocol-details)
@@ -29,7 +29,7 @@ This document provides a detailed description of the internal data flows, thread
 
 The library provides two abstraction levels:
 
-- **High-level** (`IXPlaneWebConnector`): Subscribe to datarefs with callbacks, set values by path, send commands by name. The library handles name?ID resolution, WebSocket framing, and JSON serialization transparently.
+- **High-level** (`IXPlaneWebConnector`): Subscribe to datarefs with callbacks, set values by path, send commands by name. The library handles name→ID resolution, WebSocket framing, and JSON serialization transparently.
 - **Low-level** (`IXPlaneApi`): Direct access to the X-Plane REST endpoints and raw WebSocket operations using session IDs.
 
 A third interface (`IXPlaneAvailabilityCheck`) handles startup sequencing — waiting for X-Plane to be reachable and for plugin datarefs to be registered.
@@ -37,34 +37,34 @@ A third interface (`IXPlaneAvailabilityCheck`) handles startup sequencing — wa
 ### System Context
 
 ```
-???????????????????????????????????????????????????????????????????????
-?                        Consumer Application                        ?
-?                                                                     ?
-?  ????????????????  ?????????????????????  ???????????????????????  ?
-?  ? Panel Handler ?  ? Hosted Service    ?  ? Custom Components   ?  ?
-?  ? (hardware I/O)?  ? (lifecycle mgmt)  ?  ? (your code)         ?  ?
-?  ????????????????  ?????????????????????  ???????????????????????  ?
-?         ?                   ?                        ?              ?
-?         ??????????????????????????????????????????????              ?
-?                             ?                                       ?
-?                ???????????????????????????                          ?
-?                ?   IXPlaneWebConnector   ? High-level API           ?
-?                ?   IXPlaneApi            ? Low-level API            ?
-?                ?   IXPlaneAvailability   ? Startup sequencing       ?
-?                ?        Check            ?                          ?
-?                ???????????????????????????                          ?
-???????????????????????????????????????????????????????????????????????
-                              ?
-              ?????????????????????????????????
-              ? HTTP (REST)   ? WebSocket      ?
-              ?               ?                ?
-              ?               ?                ?
-???????????????????????????????????????????????????????????????????????
-?                      X-Plane 12.1.1+                                ?
-?                                                                     ?
-?  /api/v3/datarefs    /api/v3/commands    ws://host:port/api/v3      ?
-?  /api/v3/flight      /api/capabilities                              ?
-???????????????????????????????????????????????????????????????????????
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Consumer Application                        │
+│                                                                     │
+│  ┌──────────────┐  ┌───────────────────┐  ┌─────────────────────┐  │
+│  │ Panel Handler │  │ Hosted Service    │  │ Custom Components   │  │
+│  │ (hardware I/O)│  │ (lifecycle mgmt)  │  │ (your code)         │  │
+│  └──────────────┘  └───────────────────┘  └─────────────────────┘  │
+│         │                   │                        │              │
+│         └───────────────────┼────────────────────────┘              │
+│                             │                                       │
+│                ┌────────────┴────────────┐                          │
+│                │   IXPlaneWebConnector   │ High-level API           │
+│                │   IXPlaneApi            │ Low-level API            │
+│                │   IXPlaneAvailability   │ Startup sequencing       │
+│                │        Check            │                          │
+│                └─────────────────────────┘                          │
+└─────────────────────────────────────────────────────────────────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              │ HTTP (REST)   │ WebSocket      │
+              │               │                │
+              │               │                │
+┌─────────────────────────────────────────────────────────────────────┐
+│                      X-Plane 12.1.1+                                │
+│                                                                     │
+│  /api/v3/datarefs    /api/v3/commands    ws://host:port/api/v3      │
+│  /api/v3/flight      /api/capabilities                              │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -74,38 +74,38 @@ A third interface (`IXPlaneAvailabilityCheck`) handles startup sequencing — wa
 The three interfaces are implemented by a single class (`XPlaneWebConnector`) but serve different roles:
 
 ```
-                    ????????????????????????????????
-                    ?      XPlaneWebConnector       ?
-                    ?   (sealed partial class)      ?
-                    ????????????????????????????????
-                    ? implements:                   ?
-                    ?  • IXPlaneWebConnector        ?
-                    ?  • IXPlaneApi                 ?
-                    ?  • IXPlaneAvailabilityCheck   ?
-                    ?  • IDisposable                ?
-                    ????????????????????????????????
+                    ┌──────────────────────────────┐
+                    │      XPlaneWebConnector       │
+                    │   (sealed partial class)      │
+                    ├──────────────────────────────┤
+                    │ implements:                   │
+                    │  • IXPlaneWebConnector        │
+                    │  • IXPlaneApi                 │
+                    │  • IXPlaneAvailabilityCheck   │
+                    │  • IDisposable                │
+                    └──────────────────────────────┘
 
- ???????????????????????????  ??????????????????????????  ????????????????????????????
- ?  IXPlaneWebConnector    ?  ?   IXPlaneApi            ?  ? IXPlaneAvailabilityCheck ?
- ?  (high-level)           ?  ?   (low-level)           ?  ? (startup)                ?
- ???????????????????????????  ??????????????????????????  ????????????????????????????
- ? Start()                 ?  ? GetCapabilitiesAsync()  ?  ? IsAvailableAsync()       ?
- ? StopAsync()             ?  ? ListDataRefsAsync()     ?  ? WaitUntilAvailableAsync()?
- ? SubscribeAsync()        ?  ? GetDataRefCountAsync()  ?  ? ConnectionClosed event   ?
- ? SetDataRefValueAsync()  ?  ? GetDataRefValueAsync()  ?  ????????????????????????????
- ? SendCommandAsync()      ?  ? SetDataRefValueByIdAs() ?
- ? Dispose()               ?  ? SetDataRefValuesByWs()  ?
- ???????????????????????????  ? ListCommandsAsync()     ?
-                              ? GetCommandCountAsync()   ?
-                              ? ActivateCommandAsync()   ?
-                              ? StartFlightAsync()       ?
-                              ? UpdateFlightAsync()      ?
-                              ? SubscribeDataRefsAsync() ?
-                              ? UnsubscribeDataRefsAs()  ?
-                              ? UnsubscribeAllDataRefs() ?
-                              ? Subscribe/Unsub CmdUpd() ?
-                              ? SetCommandActiveAsync()  ?
-                              ??????????????????????????
+ ┌─────────────────────────┐  ┌────────────────────────┐  ┌──────────────────────────┐
+ │  IXPlaneWebConnector    │  │   IXPlaneApi            │  │ IXPlaneAvailabilityCheck │
+ │  (high-level)           │  │   (low-level)           │  │ (startup)                │
+ ├─────────────────────────┤  ├────────────────────────┤  ├──────────────────────────┤
+ │ Start()                 │  │ GetCapabilitiesAsync()  │  │ IsAvailableAsync()       │
+ │ StopAsync()             │  │ ListDataRefsAsync()     │  │ WaitUntilAvailableAsync()│
+ │ SubscribeAsync()        │  │ GetDataRefCountAsync()  │  │ ConnectionClosed event   │
+ │ SetDataRefValueAsync()  │  │ GetDataRefValueAsync()  │  └──────────────────────────┘
+ │ SendCommandAsync()      │  │ SetDataRefValueByIdAs() │
+ │ Dispose()               │  │ SetDataRefValuesByWs()  │
+ └─────────────────────────┘  │ ListCommandsAsync()     │
+                              │ GetCommandCountAsync()   │
+                              │ ActivateCommandAsync()   │
+                              │ StartFlightAsync()       │
+                              │ UpdateFlightAsync()      │
+                              │ SubscribeDataRefsAsync() │
+                              │ UnsubscribeDataRefsAs()  │
+                              │ UnsubscribeAllDataRefs() │
+                              │ Subscribe/Unsub CmdUpd() │
+                              │ SetCommandActiveAsync()  │
+                              └────────────────────────┘
 ```
 
 ### When to use which interface
@@ -129,11 +129,11 @@ The library uses three primary types for consumer-facing dataref and command ref
 
 ```
   SimDataRefBase (abstract)
-       ?
-       ??? SimDataRef          DataRef: string, Value: float
-       ?                       Numeric datarefs (most common)
-       ?
-       ??? SimStringDataRef    DataRef: string, Value: string
+       │
+       ├── SimDataRef          DataRef: string, Value: float
+       │                       Numeric datarefs (most common)
+       │
+       └── SimStringDataRef    DataRef: string, Value: string
                                String/data-type datarefs (tail number, etc.)
 
   SimCommand                   Command: string, Description: string
@@ -145,9 +145,9 @@ The library uses three primary types for consumer-facing dataref and command ref
 The `DataRef` path supports array indexing via bracket notation. The library parses this internally:
 
 ```
-"sim/cockpit/autopilot/heading"        ? basePath = "sim/.../heading",   index = -1 (scalar)
-"AirbusFBW/Foo[7]"                     ? basePath = "AirbusFBW/Foo",     index = 7  (array)
-"sim/cockpit2/engine/indicators/N1[0]" ? basePath = "sim/.../N1",        index = 0  (array)
+"sim/cockpit/autopilot/heading"        → basePath = "sim/.../heading",   index = -1 (scalar)
+"AirbusFBW/Foo[7]"                     → basePath = "AirbusFBW/Foo",     index = 7  (array)
+"sim/cockpit2/engine/indicators/N1[0]" → basePath = "sim/.../N1",        index = 0  (array)
 ```
 
 The `ParseDataRefPath` method uses a source-generated regex to extract base path and index.
@@ -160,54 +160,54 @@ The `ParseDataRefPath` method uses a source-generated regex to extract base path
 
 ```
 Consumer                        Library                          X-Plane
-   ?                               ?                               ?
-   ?  new XPlaneWebConnector(...)  ?                               ?
-   ???????????????????????????????>?  (constructor: saves config,  ?
-   ?                               ?   creates HttpClient)         ?
-   ?                               ?                               ?
-   ?  WaitUntilAvailableAsync()    ?                               ?
-   ???????????????????????????????>?                               ?
-   ?                               ????? GET /api/capabilities ??>?
-   ?                               ?<??? 200 OK ??????????????????
-   ?                               ?                               ?
-   ?                               ?  (Phase 2: readiness probe)   ?
-   ?                               ????? GET /datarefs?filter ???>?
-   ?                               ?<??? { data: [{id: ...}] } ???
-   ?                               ?                               ?
-   ?  Start()                      ?                               ?
-   ???????????????????????????????>?  Creates CancellationToken    ?
-   ?                               ?  Launches:                    ?
-   ?                               ?   ConnectWebSocketAndReceive  ?
-   ?                               ?    ?? ProcessIncomingMessages ?
-   ?                               ?                               ?
-   ?                               ??? ws:// CONNECT ????????????>?
-   ?                               ?<? WebSocket OPEN ?????????????
-   ?                               ?                               ?
-   ?  SubscribeAsync(dataref, cb)  ?                               ?
-   ???????????????????????????????>?  (see §5 and §7 for details) ?
-   ?                               ?                               ?
+   │                               │                               │
+   │  new XPlaneWebConnector(...)  │                               │
+   │──────────────────────────────>│  (constructor: saves config,  │
+   │                               │   creates HttpClient)         │
+   │                               │                               │
+   │  WaitUntilAvailableAsync()    │                               │
+   │──────────────────────────────>│                               │
+   │                               │───── GET /api/capabilities ──>│
+   │                               │<──── 200 OK ─────────────────│
+   │                               │                               │
+   │                               │  (Phase 2: readiness probe)   │
+   │                               │───── GET /datarefs?filter ───>│
+   │                               │<──── { data: [{id: ...}] } ──│
+   │                               │                               │
+   │  Start()                      │                               │
+   │──────────────────────────────>│  Creates CancellationToken    │
+   │                               │  Launches:                    │
+   │                               │   ConnectWebSocketAndReceive  │
+   │                               │    └─ ProcessIncomingMessages │
+   │                               │                               │
+   │                               │──── ws:// CONNECT ──────────>│
+   │                               │<── WebSocket OPEN ───────────│
+   │                               │                               │
+   │  SubscribeAsync(dataref, cb)  │                               │
+   │──────────────────────────────>│  (see §5 and §7 for details) │
+   │                               │                               │
 ```
 
 ### Shutdown Sequence
 
 ```
 Consumer                        Library                          X-Plane
-   ?                               ?                               ?
-   ?  StopAsync(timeout)           ?                               ?
-   ???????????????????????????????>?                               ?
-   ?                               ?  CancellationToken.Cancel()   ?
-   ?                               ?  await _receiveTask           ?
-   ?                               ?    (with timeout)             ?
-   ?                               ?                               ?
-   ?                               ??? ws:// CLOSE ??????????????>?
-   ?                               ?<? CLOSE ACK ?????????????????
-   ?                               ?                               ?
-   ?                               ?  Clear subscriptions          ?
-   ?                               ?  Clear caches                 ?
-   ?                               ?                               ?
-   ?  Dispose()                    ?                               ?
-   ???????????????????????????????>?  Dispose CTS, WebSocket,      ?
-   ?                               ?  HttpClient                   ?
+   │                               │                               │
+   │  StopAsync(timeout)           │                               │
+   │──────────────────────────────>│                               │
+   │                               │  CancellationToken.Cancel()   │
+   │                               │  await _receiveTask           │
+   │                               │    (with timeout)             │
+   │                               │                               │
+   │                               │──── ws:// CLOSE ────────────>│
+   │                               │<── CLOSE ACK ────────────────│
+   │                               │                               │
+   │                               │  Clear subscriptions          │
+   │                               │  Clear caches                 │
+   │                               │                               │
+   │  Dispose()                    │                               │
+   │──────────────────────────────>│  Dispose CTS, WebSocket,      │
+   │                               │  HttpClient                   │
 ```
 
 ### Server-Initiated Shutdown
@@ -216,20 +216,20 @@ When X-Plane exits or closes the WebSocket:
 
 ```
 X-Plane                          Library                       Consumer
-   ?                               ?                               ?
-   ??? WebSocket CLOSE ??????????>?                               ?
-   ?                               ?  ReceiveLoopAsync detects     ?
-   ?                               ?  MessageType.Close            ?
-   ?                               ?                               ?
-   ?                               ?  ConnectionClosed?.Invoke()   ?
-   ?                               ???????????????????????????????>?
-   ?                               ?                               ?  (consumer reacts:
-   ?                               ?                               ?   e.g. StopApplication)
+   │                               │                               │
+   │──── WebSocket CLOSE ────────>│                               │
+   │                               │  ReceiveLoopAsync detects     │
+   │                               │  MessageType.Close            │
+   │                               │                               │
+   │                               │  ConnectionClosed?.Invoke()   │
+   │                               │──────────────────────────────>│
+   │                               │                               │  (consumer reacts:
+   │                               │                               │   e.g. StopApplication)
 ```
 
 ---
 
-## 5. Outbound Dataflow: Consumer ? X-Plane
+## 5. Outbound Dataflow: Consumer → X-Plane
 
 There are three outbound paths, each with a different protocol and purpose.
 
@@ -237,53 +237,53 @@ There are three outbound paths, each with a different protocol and purpose.
 
 ```
 Consumer                         Library                                      X-Plane
-   ?                                ?                                            ?
-   ? SubscribeAsync(SimDataRef, cb) ?                                            ?
-   ????????????????????????????????>?                                            ?
-   ?                                ?                                            ?
-   ?                                ?  ParseDataRefPath("AirbusFBW/Foo[7]")      ?
-   ?                                ?  ? basePath="AirbusFBW/Foo", index=7       ?
-   ?                                ?                                            ?
-   ?                                ?  ResolveDataRefIdAsync("AirbusFBW/Foo")    ?
-   ?                                ?  ?? cache hit? ? return id                 ?
-   ?                                ?  ?? cache miss:                            ?
-   ?                                ?     GET /api/v3/datarefs                   ?
-   ?                                ?       ?filter[name]=AirbusFBW/Foo          ?
-   ?                                ?       &fields=id,name ???????????????????>?
-   ?                                ?     ? { data: [{ id: 42 }] } ????????????
-   ?                                ?     cache[path] = 42                       ?
-   ?                                ?                                            ?
-   ?                                ?  _subscriptions[(42, 7)] = (dataref, cb)   ?
-   ?                                ?  _subscribedIndices[42].Add(7)             ?
-   ?                                ?                                            ?
-   ?                                ?  WS ? { req_id: N,                         ?
-   ?                                ?         type: "dataref_subscribe_values",  ?
-   ?                                ?         params: { datarefs: [              ?
-   ?                                ?           { id: 42, index: 7 }             ?
-   ?                                ?         ]}} ????????????????????????????> ?
-   ?                                ?                                            ?
+   │                                │                                            │
+   │ SubscribeAsync(SimDataRef, cb) │                                            │
+   │───────────────────────────────>│                                            │
+   │                                │                                            │
+   │                                │  ParseDataRefPath("AirbusFBW/Foo[7]")      │
+   │                                │  → basePath="AirbusFBW/Foo", index=7       │
+   │                                │                                            │
+   │                                │  ResolveDataRefIdAsync("AirbusFBW/Foo")    │
+   │                                │  ├─ cache hit? → return id                 │
+   │                                │  └─ cache miss:                            │
+   │                                │     GET /api/v3/datarefs                   │
+   │                                │       ?filter[name]=AirbusFBW/Foo          │
+   │                                │       &fields=id,name ─────────────────>│
+   │                                │     ← { data: [{ id: 42 }] } ──────────│
+   │                                │     cache[path] = 42                       │
+   │                                │                                            │
+   │                                │  _subscriptions[(42, 7)] = (dataref, cb)   │
+   │                                │  _subscribedIndices[42].Add(7)             │
+   │                                │                                            │
+   │                                │  WS → { req_id: N,                         │
+   │                                │         type: "dataref_subscribe_values",  │
+   │                                │         params: { datarefs: [              │
+   │                                │           { id: 42, index: 7 }             │
+   │                                │         ]}} ──────────────────────────────>│
+   │                                │                                            │
 ```
 
 ### 5.2 Set Dataref Value (High-Level)
 
 ```
 Consumer                                 Library                          X-Plane
-   ?                                        ?                                ?
-   ? SetDataRefValueAsync("path[3]", 1.0f)  ?                                ?
-   ????????????????????????????????????????>?                                ?
-   ?                                        ?  ParseDataRefPath ? (path, 3)  ?
-   ?                                        ?  ResolveDataRefIdAsync(path)   ?
-   ?                                        ?  ? id (from cache or REST)     ?
-   ?                                        ?                                ?
-   ?                                        ?  WS ? { req_id: N,             ?
-   ?                                        ?         type: "dataref_set_    ?
-   ?                                        ?               values",         ?
-   ?                                        ?         params: { datarefs: [  ?
-   ?                                        ?           { id: 42,            ?
-   ?                                        ?             value: 1.0,        ?
-   ?                                        ?             index: 3 }         ?
-   ?                                        ?         ]}} ?????????????????>?
-   ?                                        ?                                ?
+   │                                        │                                │
+   │ SetDataRefValueAsync("path[3]", 1.0f)  │                                │
+   │───────────────────────────────────────>│                                │
+   │                                        │  ParseDataRefPath → (path, 3)  │
+   │                                        │  ResolveDataRefIdAsync(path)   │
+   │                                        │  → id (from cache or REST)     │
+   │                                        │                                │
+   │                                        │  WS → { req_id: N,             │
+   │                                        │         type: "dataref_set_    │
+   │                                        │               values",         │
+   │                                        │         params: { datarefs: [  │
+   │                                        │           { id: 42,            │
+   │                                        │             value: 1.0,        │
+   │                                        │             index: 3 }         │
+   │                                        │         ]}} ────────────────>│
+   │                                        │                                │
 ```
 
 String datarefs follow the same path but base64-encode the value before sending.
@@ -292,64 +292,64 @@ String datarefs follow the same path but base64-encode the value before sending.
 
 ```
 Consumer                                Library                          X-Plane
-   ?                                       ?                                ?
-   ? SendCommandAsync(SimCommand)          ?                                ?
-   ???????????????????????????????????????>?                                ?
-   ?                                       ?  ResolveCommandIdAsync(name)   ?
-   ?                                       ?  ? id (from cache or REST)     ?
-   ?                                       ?                                ?
-   ?                                       ?  WS ? { req_id: N,             ?
-   ?                                       ?         type: "command_set_    ?
-   ?                                       ?               is_active",      ?
-   ?                                       ?         params: { commands: [  ?
-   ?                                       ?           { id: 100,           ?
-   ?                                       ?             is_active: true,   ?
-   ?                                       ?             duration: 0 }      ?
-   ?                                       ?         ]}} ?????????????????>?
-   ?                                       ?                                ?
+   │                                       │                                │
+   │ SendCommandAsync(SimCommand)          │                                │
+   │──────────────────────────────────────>│                                │
+   │                                       │  ResolveCommandIdAsync(name)   │
+   │                                       │  → id (from cache or REST)     │
+   │                                       │                                │
+   │                                       │  WS → { req_id: N,             │
+   │                                       │         type: "command_set_    │
+   │                                       │               is_active",      │
+   │                                       │         params: { commands: [  │
+   │                                       │           { id: 100,           │
+   │                                       │             is_active: true,   │
+   │                                       │             duration: 0 }      │
+   │                                       │         ]}} ────────────────>│
+   │                                       │                                │
 ```
 
 ### 5.4 Outbound Summary
 
 ```
-                         ????????????????????????????????????????????????
-                         ?          Outbound Data Paths                 ?
-                         ????????????????????????????????????????????????
-                         ?                                              ?
-Consumer ??> IXPlaneWebConnector                                       ?
-  ?          ?                                                          ?
-  ?          ??? SubscribeAsync()                                       ?
-  ?          ?     ?? ResolveDataRefIdAsync() ???? REST GET ??> X-Plane ?
-  ?          ?     ?? SendDataRefSubscribeAsync() ?? WS ??????> X-Plane ?
-  ?          ?                                                          ?
-  ?          ??? SetDataRefValueAsync()                                 ?
-  ?          ?     ?? ResolveDataRefIdAsync() ???? REST GET ??> X-Plane ?
-  ?          ?     ?? SetDataRefValuesByWsAsync() ?? WS ??????> X-Plane ?
-  ?          ?                                                          ?
-  ?          ??? SendCommandAsync()                                     ?
-  ?                ?? ResolveCommandIdAsync() ???? REST GET ??> X-Plane ?
-  ?                ?? SetCommandActiveAsync() ????? WS ????????> X-Plane?
-  ?                                                                     ?
-Consumer ??> IXPlaneApi                                                 ?
-  ?          ?                                                          ?
-  ?          ??? ListDataRefsAsync() ???????????? REST GET ??> X-Plane  ?
-  ?          ??? SetDataRefValueByIdAsync() ???? REST PATCH ??> X-Plane ?
-  ?          ??? SetDataRefValuesByWsAsync() ?????? WS ??????> X-Plane  ?
-  ?          ??? ActivateCommandAsync() ???????? REST POST ??> X-Plane  ?
-  ?          ??? SetCommandActiveAsync() ?????????? WS ??????> X-Plane  ?
-  ?          ??? StartFlightAsync() ???????????? REST POST ??> X-Plane  ?
-  ?          ??? UpdateFlightAsync() ??????????? REST PATCH ??> X-Plane ?
-  ?                                                                     ?
-  ?? All WebSocket sends go through SendWebSocketFireAndForgetAsync()   ?
-     ? JSON serialize with source-generated context                     ?
-     ? ClientWebSocket.SendAsync()                                      ?
-     ? No acknowledgement waiting                                       ?
-                         ????????????????????????????????????????????????
+                         ┌──────────────────────────────────────────────┐
+                         │          Outbound Data Paths                 │
+                         ├──────────────────────────────────────────────┤
+                         │                                              │
+Consumer ──> IXPlaneWebConnector                                       │
+  │          │                                                          │
+  │          ├── SubscribeAsync()                                       │
+  │          │     ├─ ResolveDataRefIdAsync() ──── REST GET ──> X-Plane │
+  │          │     └─ SendDataRefSubscribeAsync() ── WS ──────> X-Plane │
+  │          │                                                          │
+  │          ├── SetDataRefValueAsync()                                 │
+  │          │     ├─ ResolveDataRefIdAsync() ──── REST GET ──> X-Plane │
+  │          │     └─ SetDataRefValuesByWsAsync() ── WS ──────> X-Plane │
+  │          │                                                          │
+  │          └── SendCommandAsync()                                     │
+  │                ├─ ResolveCommandIdAsync() ──── REST GET ──> X-Plane │
+  │                └─ SetCommandActiveAsync() ───── WS ────────> X-Plane│
+  │                                                                     │
+Consumer ──> IXPlaneApi                                                 │
+  │          │                                                          │
+  │          ├── ListDataRefsAsync() ──────────── REST GET ──> X-Plane  │
+  │          ├── SetDataRefValueByIdAsync() ──── REST PATCH ──> X-Plane │
+  │          ├── SetDataRefValuesByWsAsync() ────── WS ──────> X-Plane  │
+  │          ├── ActivateCommandAsync() ──────── REST POST ──> X-Plane  │
+  │          ├── SetCommandActiveAsync() ────────── WS ──────> X-Plane  │
+  │          ├── StartFlightAsync() ──────────── REST POST ──> X-Plane  │
+  │          └── UpdateFlightAsync() ─────────── REST PATCH ──> X-Plane │
+  │                                                                     │
+  └─ All WebSocket sends go through SendWebSocketFireAndForgetAsync()   │
+     → JSON serialize with source-generated context                     │
+     → ClientWebSocket.SendAsync()                                      │
+     → No acknowledgement waiting                                       │
+                         └──────────────────────────────────────────────┘
 ```
 
 ---
 
-## 6. Inbound Dataflow: X-Plane ? Consumer
+## 6. Inbound Dataflow: X-Plane → Consumer
 
 Inbound data arrives exclusively via WebSocket. The library uses a **two-stage pipeline** to decouple fast WebSocket reads from potentially slow callback processing:
 
@@ -357,43 +357,43 @@ Inbound data arrives exclusively via WebSocket. The library uses a **two-stage p
 
 ```
 X-Plane                    Library                                      Consumer
-   ?                          ?                                            ?
-   ?  WS frame               ?                                            ?
-   ?  (dataref_update_values) ?                                            ?
-   ??????????????????????????>?                                            ?
-   ?                          ?                                            ?
-   ?                          ?  ???????????????????????????????????????   ?
-   ?                          ?  ? Stage 1: ReceiveLoopAsync           ?   ?
-   ?                          ?  ? (Thread: WS receive task)           ?   ?
-   ?                          ?  ?                                     ?   ?
-   ?                          ?  ? • Read complete WS message          ?   ?
-   ?                          ?  ? • Assemble multi-frame messages     ?   ?
-   ?                          ?  ? • Detect Close frames               ?   ?
-   ?                          ?  ? • Enqueue raw byte[] into Channel   ?   ?
-   ?                          ?  ?   (bounded, DropOldest if full)     ?   ?
-   ?                          ?  ???????????????????????????????????????   ?
-   ?                          ?                 ?                          ?
-   ?                          ?                 ?                          ?
-   ?                          ?  ????????????????????????????????????      ?
-   ?                          ?  ? Channel<byte[]> (capacity: 50)  ?      ?
-   ?                          ?  ? BoundedChannelFullMode.DropOldest?      ?
-   ?                          ?  ? SingleReader = true              ?      ?
-   ?                          ?  ???????????????????????????????????      ?
-   ?                          ?                 ?                          ?
-   ?                          ?                 ?                          ?
-   ?                          ?  ???????????????????????????????????????   ?
-   ?                          ?  ? Stage 2: ProcessIncomingMessagesAs  ?   ?
-   ?                          ?  ? (Thread: processing task)           ?   ?
-   ?                          ?  ?                                     ?   ?
-   ?                          ?  ? • JSON parse (JsonDocument)         ?   ?
-   ?                          ?  ? • Dispatch by message type          ?   ?
-   ?                          ?  ? • Look up registered callbacks      ?   ?
-   ?                          ?  ? • Invoke consumer callbacks         ?   ?
-   ?                          ?  ???????????????????????????????????????   ?
-   ?                          ?                        ?                   ?
-   ?                          ?                        ?                   ?
-   ?                          ?            callback(SimDataRef, float) ??>?
-   ?                          ?                                            ?
+   │                          │                                            │
+   │  WS frame               │                                            │
+   │  (dataref_update_values) │                                            │
+   │─────────────────────────>│                                            │
+   │                          │                                            │
+   │                          │  ┌─────────────────────────────────────┐   │
+   │                          │  │ Stage 1: ReceiveLoopAsync           │   │
+   │                          │  │ (Thread: WS receive task)           │   │
+   │                          │  │                                     │   │
+   │                          │  │ • Read complete WS message          │   │
+   │                          │  │ • Assemble multi-frame messages     │   │
+   │                          │  │ • Detect Close frames               │   │
+   │                          │  │ • Enqueue raw byte[] into Channel   │   │
+   │                          │  │   (bounded, DropOldest if full)     │   │
+   │                          │  └─────────────────────────────────────┘   │
+   │                          │                 │                          │
+   │                          │                 ▼                          │
+   │                          │  ┌──────────────────────────────────┐      │
+   │                          │  │ Channel<byte[]> (capacity: 50)  │      │
+   │                          │  │ BoundedChannelFullMode.DropOldest│      │
+   │                          │  │ SingleReader = true              │      │
+   │                          │  └──────────────────────────────────┘      │
+   │                          │                 │                          │
+   │                          │                 ▼                          │
+   │                          │  ┌─────────────────────────────────────┐   │
+   │                          │  │ Stage 2: ProcessIncomingMessagesAs  │   │
+   │                          │  │ (Thread: processing task)           │   │
+   │                          │  │                                     │   │
+   │                          │  │ • JSON parse (JsonDocument)         │   │
+   │                          │  │ • Dispatch by message type          │   │
+   │                          │  │ • Look up registered callbacks      │   │
+   │                          │  │ • Invoke consumer callbacks         │   │
+   │                          │  └─────────────────────────────────────┘   │
+   │                          │                        │                   │
+   │                          │                        ▼                   │
+   │                          │            callback(SimDataRef, float) ──>│
+   │                          │                                            │
 ```
 
 ### 6.2 Message Type Routing
@@ -402,40 +402,40 @@ Stage 2 routes messages based on the `type` field in the JSON:
 
 ```
 ProcessIncomingMessage(byte[])
-   ?
-   ??? type == "dataref_update_values"
-   ?   ??? HandleDataRefUpdates()
-   ?       ?
-   ?       ??? data[id] is Number (scalar)
-   ?       ?   ??? DispatchScalarUpdate(id, float)
-   ?       ?       ??? _subscriptions[(id, -1)] ? callback(SimDataRef, value)
-   ?       ?
-   ?       ??? data[id] is Array
-   ?       ?   ??? DispatchArrayUpdate(id, JsonElement)
-   ?       ?       ?
-   ?       ?       ??? _stringSubscriptions[(id, -1)] exists?
-   ?       ?       ?   ??? DecodeBase64ArrayToString() ? callback(SimStringDataRef, string)
-   ?       ?       ?
-   ?       ?       ??? _subscribedIndices[id] exists?
-   ?       ?       ?   ??? For each position in sorted index set:
-   ?       ?       ?       ??? _subscriptions[(id, idx)] ? callback(SimDataRef, value)
-   ?       ?       ?
-   ?       ?       ??? No indices tracked:
-   ?       ?           ??? Iterate array positions 0..N:
-   ?       ?               ??? _subscriptions[(id, pos)] ? callback(SimDataRef, value)
-   ?       ?
-   ?       ??? data[id] is String (base64-encoded)
-   ?           ??? DispatchStringUpdate(id, base64)
-   ?               ??? Base64 decode ? _stringSubscriptions[(id, -1)] ? callback
-   ?
-   ??? type == "command_update_is_active"
-   ?   ??? HandleCommandUpdates()
-   ?       ??? For each command ID in data:
-   ?           ??? _commandSubscriptions[id] ? callback(id, bool isActive)
-   ?
-   ??? type == "result"
-       ??? Deserialize WsResultMessage
-           ??? If !Success ? log warning with error code and message
+   │
+   ├── type == "dataref_update_values"
+   │   └── HandleDataRefUpdates()
+   │       │
+   │       ├── data[id] is Number (scalar)
+   │       │   └── DispatchScalarUpdate(id, float)
+   │       │       └── _subscriptions[(id, -1)] → callback(SimDataRef, value)
+   │       │
+   │       ├── data[id] is Array
+   │       │   └── DispatchArrayUpdate(id, JsonElement)
+   │       │       │
+   │       │       ├── _stringSubscriptions[(id, -1)] exists?
+   │       │       │   └── DecodeBase64ArrayToString() → callback(SimStringDataRef, string)
+   │       │       │
+   │       │       ├── _subscribedIndices[id] exists?
+   │       │       │   └── For each position in sorted index set:
+   │       │       │       └── _subscriptions[(id, idx)] → callback(SimDataRef, value)
+   │       │       │
+   │       │       └── No indices tracked:
+   │       │           └── Iterate array positions 0..N:
+   │       │               └── _subscriptions[(id, pos)] → callback(SimDataRef, value)
+   │       │
+   │       └── data[id] is String (base64-encoded)
+   │           └── DispatchStringUpdate(id, base64)
+   │               └── Base64 decode → _stringSubscriptions[(id, -1)] → callback
+   │
+   ├── type == "command_update_is_active"
+   │   └── HandleCommandUpdates()
+   │       └── For each command ID in data:
+   │           └── _commandSubscriptions[id] → callback(id, bool isActive)
+   │
+   └── type == "result"
+       └── Deserialize WsResultMessage
+           └── If !Success → log warning with error code and message
 ```
 
 ### 6.3 Array Dataref Dispatch Detail
@@ -449,9 +449,9 @@ Example: Consumer subscribes to indices [3, 7, 1]
 
   X-Plane sends:  { "42": [0.5, 1.2, 3.4] }
                             ^    ^    ^
-                            ?    ?    ??? position 2 ? index 7
-                            ?    ???????? position 1 ? index 3
-                            ????????????? position 0 ? index 1
+                            │    │    └── position 2 → index 7
+                            │    └────── position 1 → index 3
+                            └─────────── position 0 → index 1
 
   Dispatch:
     _subscriptions[(42, 1)].Callback(element, 0.5)
@@ -466,12 +466,12 @@ String datarefs from X-Plane can arrive in two formats:
 ```
 Format 1: Base64 string
   { "42": "SEVMTE8=" }
-  ? Base64 decode ? "HELLO"
+  → Base64 decode → "HELLO"
 
 Format 2: Byte array (data-type datarefs)
   { "42": [72, 69, 76, 76, 79, 0, 0, 0] }
-  ? DecodeBase64ArrayToString()
-  ? Assemble bytes, trim trailing nulls ? "HELLO"
+  → DecodeBase64ArrayToString()
+  → Assemble bytes, trim trailing nulls → "HELLO"
 ```
 
 ---
@@ -481,44 +481,44 @@ Format 2: Byte array (data-type datarefs)
 X-Plane's WebSocket API uses numeric session IDs, not string paths. The library resolves names to IDs via REST and caches them:
 
 ```
-???????????????????????????????????????????????????????????????????????
-?                       ID Resolution Flow                            ?
-???????????????????????????????????????????????????????????????????????
-?                                                                     ?
-?  Consumer calls:                                                    ?
-?    SubscribeAsync(new SimDataRef { DataRef = "sim/.../heading" })   ?
-?                                                                     ?
-?         ?                                                           ?
-?         ?                                                           ?
-?  ????????????????????????????                                       ?
-?  ?  _dataRefIdCache         ?                                       ?
-?  ?  ConcurrentDictionary    ?     ???? hit ??> return cached id     ?
-?  ?  <string, long>          ???????                                 ?
-?  ????????????????????????????     ???? miss ???                     ?
-?                                               ?                     ?
-?                                               ?                     ?
-?                                  ???????????????????????????        ?
-?                                  ? REST: GET /api/v3/      ?        ?
-?                                  ?   datarefs?filter[name]= ?        ?
-?                                  ?   {path}&fields=id,name  ?        ?
-?                                  ???????????????????????????        ?
-?                                               ?                     ?
-?                                               ?                     ?
-?                                  ???????????????????????????        ?
-?                                  ? Parse response:          ?        ?
-?                                  ? { data: [{ id: 42 }] }  ?        ?
-?                                  ?                          ?        ?
-?                                  ? _dataRefIdCache[path]=42 ?        ?
-?                                  ? return 42                ?        ?
-?                                  ???????????????????????????        ?
-?                                                                     ?
-?  Same flow for _commandIdCache via ResolveCommandIdAsync()          ?
-?                                                                     ?
-?  ? Cache is NOT cleared on reconnect — IDs are session-scoped      ?
-?    in X-Plane but in practice remain stable within a session.       ?
-?    Caches are cleared on StopAsync().                               ?
-?                                                                     ?
-???????????????????????????????????????????????????????????????????????
+┌─────────────────────────────────────────────────────────────────────┐
+│                       ID Resolution Flow                            │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Consumer calls:                                                    │
+│    SubscribeAsync(new SimDataRef { DataRef = "sim/.../heading" })   │
+│                                                                     │
+│         │                                                           │
+│         ▼                                                           │
+│  ┌──────────────────────┐                                           │
+│  │  _dataRefIdCache     │                                           │
+│  │  ConcurrentDictionary│     ┌─── hit ──> return cached id         │
+│  │  <string, long>      │─────┤                                     │
+│  └──────────────────────┘     └─── miss ──────┐                     │
+│                                               │                     │
+│                                               ▼                     │
+│                                  ┌─────────────────────────┐        │
+│                                  │ REST: GET /api/v3/      │        │
+│                                  │  datarefs?filter[name]= │        │
+│                                  │  {path}&fields=id,name  │        │
+│                                  └─────────────────────────┘        │
+│                                               │                     │
+│                                               ▼                     │
+│                                  ┌──────────────────────────┐       │
+│                                  │ Parse response:          │       │
+│                                  │ { data: [{ id: 42 }] }   │       │
+│                                  │                          │       │
+│                                  │ _dataRefIdCache[path]=42 │       │
+│                                  │ return 42                │       │
+│                                  └──────────────────────────┘       │
+│                                                                     │
+│  Same flow for _commandIdCache via ResolveCommandIdAsync()          │
+│                                                                     │
+│  → Cache is NOT cleared on reconnect — IDs are session-scoped       │
+│    in X-Plane but in practice remain stable within a session.       │
+│    Caches are cleared on StopAsync().                               │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 **Performance implication:** The first time any given dataref or command is used, a synchronous REST call is made. Subsequent uses hit the in-memory `ConcurrentDictionary`. During X-Plane startup, the REST API can be slow (the simulator's main thread is saturated with loading), which can cause multi-second delays on first use.
@@ -530,46 +530,46 @@ X-Plane's WebSocket API uses numeric session IDs, not string paths. The library 
 ## 8. Threading Model & Concurrency
 
 ```
-???????????????????????????????????????????????????????????????????????
-?                       Thread / Task Map                             ?
-???????????????????????????????????????????????????????????????????????
-?                                                                     ?
-?  Task 1: ConnectWebSocketAndReceiveAsync  (background, long-lived)  ?
-?  ??? Owns the ClientWebSocket lifecycle                             ?
-?  ??? Runs ReceiveLoopAsync in a tight loop                          ?
-?  ??? Handles reconnection on failure                                ?
-?  ??? Writes raw byte[] into _incomingMessages Channel               ?
-?                                                                     ?
-?  Task 2: ProcessIncomingMessagesAsync  (background, long-lived)     ?
-?  ??? Reads from _incomingMessages Channel                           ?
-?  ??? Parses JSON and dispatches callbacks                           ?
-?  ??? Consumer callbacks run ON THIS TASK                            ?
-?      ? A slow callback blocks all other dispatches                  ?
-?      ? Consumers should offload heavy work (e.g. to a Channel)     ?
-?                                                                     ?
-?  Consumer thread(s): Any thread calling the API                     ?
-?  ??? SubscribeAsync, SetDataRefValueAsync, SendCommandAsync         ?
-?  ??? These acquire no locks (ConcurrentDictionary is lock-free)     ?
-?  ??? WebSocket sends are serialized by the runtime                  ?
-?                                                                     ?
-?  Shared state (all ConcurrentDictionary, thread-safe):              ?
-?  ??? _dataRefIdCache           (path ? id)                          ?
-?  ??? _commandIdCache           (path ? id)                          ?
-?  ??? _subscriptions            ((id, index) ? callback)             ?
-?  ??? _stringSubscriptions      ((id, index) ? callback)             ?
-?  ??? _subscribedIndices        (id ? SortedSet<int>)                ?
-?  ?   ??? SortedSet access is protected by lock(indices)             ?
-?  ??? _commandSubscriptions     (id ? callback)                      ?
-?                                                                     ?
-?  Channel<byte[]> _incomingMessages:                                 ?
-?  ??? Bounded(50), DropOldest                                        ?
-?  ??? SingleReader = true (only ProcessIncomingMessagesAsync reads)   ?
-?  ??? Writer: ReceiveLoopAsync (single writer in practice)           ?
-?                                                                     ?
-?  int _nextReqId:                                                    ?
-?  ??? Incremented atomically via Interlocked.Increment               ?
-?                                                                     ?
-???????????????????????????????????????????????????????????????????????
+┌─────────────────────────────────────────────────────────────────────┐
+│                       Thread / Task Map                             │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  Task 1: ConnectWebSocketAndReceiveAsync  (background, long-lived)  │
+│  ├── Owns the ClientWebSocket lifecycle                             │
+│  ├── Runs ReceiveLoopAsync in a tight loop                          │
+│  ├── Handles reconnection on failure                                │
+│  └── Writes raw byte[] into _incomingMessages Channel               │
+│                                                                     │
+│  Task 2: ProcessIncomingMessagesAsync  (background, long-lived)     │
+│  ├── Reads from _incomingMessages Channel                           │
+│  ├── Parses JSON and dispatches callbacks                           │
+│  └── Consumer callbacks run ON THIS TASK                            │
+│      → A slow callback blocks all other dispatches                  │
+│      → Consumers should offload heavy work (e.g. to a Channel)      │
+│                                                                     │
+│  Consumer thread(s): Any thread calling the API                     │
+│  ├── SubscribeAsync, SetDataRefValueAsync, SendCommandAsync         │
+│  ├── These acquire no locks (ConcurrentDictionary is lock-free)     │
+│  └── WebSocket sends are serialized by the runtime                  │
+│                                                                     │
+│  Shared state (all ConcurrentDictionary, thread-safe):              │
+│  ├── _dataRefIdCache           (path → id)                          │
+│  ├── _commandIdCache           (path → id)                          │
+│  ├── _subscriptions            ((id, index) → callback)             │
+│  ├── _stringSubscriptions      ((id, index) → callback)             │
+│  ├── _subscribedIndices        (id → SortedSet<int>)                │
+│  │   └── SortedSet access is protected by lock(indices)             │
+│  └── _commandSubscriptions     (id → callback)                      │
+│                                                                     │
+│  Channel<byte[]> _incomingMessages:                                 │
+│  ├── Bounded(50), DropOldest                                        │
+│  ├── SingleReader = true (only ProcessIncomingMessagesAsync reads)  │
+│  └── Writer: ReceiveLoopAsync (single writer in practice)           │
+│                                                                     │
+│  int _nextReqId:                                                    │
+│  └── Incremented atomically via Interlocked.Increment               │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Why two tasks?
@@ -615,14 +615,14 @@ All outbound messages use a common envelope:
 
 ```
 SendWebSocketFireAndForgetAsync<T>(request, jsonTypeInfo)
-   ?
-   ??? Check: _webSocket.State == Open?
-   ?   ??? No ? throw InvalidOperationException
-   ?
-   ??? Serialize to UTF-8 bytes (source-generated JsonSerializer)
-   ?
-   ??? await _webSocket.SendAsync(bytes, Text, endOfMessage: true)
-       ??? No result awaiting — X-Plane "result" messages are logged
+   │
+   ├── Check: _webSocket.State == Open?
+   │   └── No → throw InvalidOperationException
+   │
+   ├── Serialize to UTF-8 bytes (source-generated JsonSerializer)
+   │
+   └── await _webSocket.SendAsync(bytes, Text, endOfMessage: true)
+       └── No result awaiting — X-Plane "result" messages are logged
            but never correlated back to requests
 ```
 
@@ -666,31 +666,31 @@ All JSON serialization uses `XPlaneJsonContext` (source-generated `JsonSerialize
 
 ```
 ConnectWebSocketAndReceiveAsync(ct)
-   ?
-   ??? while (!ct.IsCancellationRequested)
-       ?
-       ??? Connect WebSocket
-       ??? Run ReceiveLoopAsync
-       ?
-       ??? Server closed cleanly (CloseReceived)?
-       ?   ??? Break loop ? ConnectionClosed was already raised
-       ?
-       ??? OperationCanceledException (ct requested)?
-       ?   ??? Break loop (normal shutdown)
-       ?
-       ??? Any other Exception?
-           ?
-           ??? Log: "connection lost, retrying in 3s"
-           ??? Wait 3 seconds
-           ?
-           ??? Retry connect once
-           ?   ??? Success ? continue loop (re-enter ReceiveLoopAsync)
-           ?   ??? Failure ?
-           ?       ??? Log: "reconnect failed"
-           ?       ??? ConnectionClosed?.Invoke()
-           ?       ??? Break loop
-           ?
-           ??? (only ONE retry attempt per disconnect)
+   │
+   └── while (!ct.IsCancellationRequested)
+       │
+       ├── Connect WebSocket
+       ├── Run ReceiveLoopAsync
+       │
+       ├── Server closed cleanly (CloseReceived)?
+       │   └── Break loop → ConnectionClosed was already raised
+       │
+       ├── OperationCanceledException (ct requested)?
+       │   └── Break loop (normal shutdown)
+       │
+       └── Any other Exception?
+           │
+           ├── Log: "connection lost, retrying in 3s"
+           ├── Wait 3 seconds
+           │
+           ├── Retry connect once
+           │   ├── Success → continue loop (re-enter ReceiveLoopAsync)
+           │   └── Failure →
+           │       ├── Log: "reconnect failed"
+           │       ├── ConnectionClosed?.Invoke()
+           │       └── Break loop
+           │
+           └── (only ONE retry attempt per disconnect)
 ```
 
 **Important:** After reconnection, existing subscriptions in `_subscriptions` are **not** re-registered with X-Plane. The consumer is responsible for re-subscribing after a reconnect if needed. The `ConnectionClosed` event can be used to detect this scenario.
@@ -702,112 +702,112 @@ ConnectWebSocketAndReceiveAsync(ct)
 The `JavaSimulator.Console` project demonstrates the library in a real cockpit hardware application. Here is the full bidirectional dataflow through the consumer:
 
 ```
-????????????????     Serial     ????????????????????      Library       ????????????
-?   Hardware   ? ?????????????? ?  PanelHandlerBase ? ?????????????????? ? X-Plane  ?
-?  (Arduino +  ?     UART       ?  ?? OvhPanelHandler?     WebSocket     ?  12.1.1+ ?
-?   Cockpit    ?                ?                    ?     + REST        ?          ?
-?   Panel)     ?                ?                    ?                    ?          ?
-????????????????                ????????????????????                    ????????????
+┌──────────────┐     Serial     ┌────────────────────┐      Library       ┌──────────┐
+│   Hardware   │ ◄────────────► │  PanelHandlerBase  │ ◄────────────────► │ X-Plane  │
+│  (Arduino +  │     UART       │  └─ OvhPanelHandler│     WebSocket      │  12.1.1+ │
+│   Cockpit    │                │                    │     + REST         │          │
+│   Panel)     │                │                    │                    │          │
+└──────────────┘                └────────────────────┘                    └──────────┘
 ```
 
-### Inbound: X-Plane ? Hardware (LED updates)
+### Inbound: X-Plane → Hardware (LED updates)
 
 ```
 X-Plane                   Library                 OvhPanelHandler              Hardware
-   ?                         ?                         ?                          ?
-   ? WS: dataref_update_     ?                         ?                          ?
-   ?     values              ?                         ?                          ?
-   ? { "42": 1.0 }          ?                         ?                          ?
-   ?????????????????????????>?                         ?                          ?
-   ?                         ? ReceiveLoop             ?                          ?
-   ?                         ?  ? Channel<byte[]>      ?                          ?
-   ?                         ?  ? ProcessIncoming      ?                          ?
-   ?                         ?  ? DispatchScalar       ?                          ?
-   ?                         ?    (id=42, val=1.0)     ?                          ?
-   ?                         ?                         ?                          ?
-   ?                         ? callback(SimDataRef,    ?                          ?
-   ?                         ?          1.0)           ?                          ?
-   ?                         ?????????????????????????>?                          ?
-   ?                         ?                         ? UpdateLed("K_U2", 1.0)   ?
-   ?                         ?                         ? ? SendToHardware(        ?
-   ?                         ?                         ?     "K_U2", "1")         ?
-   ?                         ?                         ? ? _serialWriteQueue      ?
-   ?                         ?                         ?     .Writer.TryWrite(    ?
-   ?                         ?                         ?       "K_U2,1;")         ?
-   ?                         ?                         ?          ?               ?
-   ?                         ?                         ?          ?               ?
-   ?                         ?                         ? DrainSerialWriteQueue    ?
-   ?                         ?                         ? ? SerialPort.WriteLine(  ?
-   ?                         ?                         ?     "K_U2,1;")           ?
-   ?                         ?                         ?????????????????????????>?
-   ?                         ?                         ?                     LED ON?
+   │                         │                         │                          │
+   │ WS: dataref_update_     │                         │                          │
+   │     values              │                         │                          │
+   │ { "42": 1.0 }           │                         │                          │
+   │────────────────────────>│                         │                          │
+   │                         │ ReceiveLoop             │                          │
+   │                         │  → Channel<byte[]>      │                          │
+   │                         │  → ProcessIncoming      │                          │
+   │                         │  → DispatchScalar       │                          │
+   │                         │    (id=42, val=1.0)     │                          │
+   │                         │                         │                          │
+   │                         │ callback(SimDataRef,    │                          │
+   │                         │          1.0)           │                          │
+   │                         │────────────────────────>│                          │
+   │                         │                         │ UpdateLed("K_U2", 1.0)   │
+   │                         │                         │ → SendToHardware(        │
+   │                         │                         │     "K_U2", "1")         │
+   │                         │                         │ → _serialWriteQueue      │
+   │                         │                         │     .Writer.TryWrite(    │
+   │                         │                         │       "K_U2,1;")         │
+   │                         │                         │          │               │
+   │                         │                         │          ▼               │
+   │                         │                         │ DrainSerialWriteQueue    │
+   │                         │                         │ → SerialPort.WriteLine(  │
+   │                         │                         │     "K_U2,1;")           │
+   │                         │                         │────────────────────────> │
+   │                         │                         │                    LED ON│
 ```
 
-### Outbound: Hardware ? X-Plane (button press)
+### Outbound: Hardware → X-Plane (button press)
 
 ```
 Hardware              OvhPanelHandler               Library                    X-Plane
-   ?                         ?                         ?                          ?
-   ? Serial: "K02,1;"       ?                         ?                          ?
-   ?????????????????????????>?                         ?                          ?
-   ?                         ? SerialPort.DataReceived ?                          ?
-   ?                         ? ? ProcessReceivedData   ?                          ?
-   ?                         ? ? Parse "K02" + "1"     ?                          ?
-   ?                         ? ? ProcessCommandAsync(  ?                          ?
-   ?                         ?     "K02", "1")         ?                          ?
-   ?                         ?                         ?                          ?
-   ?                         ? HandleK02_ApuMaster(1)  ?                          ?
-   ?                         ? ? _connector            ?                          ?
-   ?                         ?   .SendCommandAsync(    ?                          ?
-   ?                         ?     GetCommand(         ?                          ?
-   ?                         ?       "ApuMaster"))     ?                          ?
-   ?                         ?????????????????????????>?                          ?
-   ?                         ?                         ? ResolveCommandIdAsync    ?
-   ?                         ?                         ? ? cache hit (id=100)     ?
-   ?                         ?                         ?                          ?
-   ?                         ?                         ? WS: command_set_is_      ?
-   ?                         ?                         ?     active               ?
-   ?                         ?                         ? { id: 100,               ?
-   ?                         ?                         ?   is_active: true,       ?
-   ?                         ?                         ?   duration: 0 }          ?
-   ?                         ?                         ?????????????????????????>?
-   ?                         ?                         ?                   APU ON ?
+   │                         │                         │                          │
+   │ Serial: "K02,1;"       │                         │                          │
+   │────────────────────────>│                         │                          │
+   │                         │ SerialPort.DataReceived │                          │
+   │                         │ → ProcessReceivedData   │                          │
+   │                         │ → Parse "K02" + "1"     │                          │
+   │                         │ → ProcessCommandAsync(  │                          │
+   │                         │     "K02", "1")         │                          │
+   │                         │                         │                          │
+   │                         │ HandleK02_ApuMaster(1)  │                          │
+   │                         │ → _connector            │                          │
+   │                         │   .SendCommandAsync(    │                          │
+   │                         │     GetCommand(         │                          │
+   │                         │       "ApuMaster"))     │                          │
+   │                         │────────────────────────>│                          │
+   │                         │                         │ ResolveCommandIdAsync    │
+   │                         │                         │ → cache hit (id=100)     │
+   │                         │                         │                          │
+   │                         │                         │ WS: command_set_is_      │
+   │                         │                         │     active               │
+   │                         │                         │ { id: 100,               │
+   │                         │                         │   is_active: true,       │
+   │                         │                         │   duration: 0 }          │
+   │                         │                         │────────────────────────>│
+   │                         │                         │                   APU ON │
 ```
 
 ### Consumer Startup Sequence
 
 ```
 Program.cs                PanelHostedService       XPlaneWebConnector      OvhPanelHandler
-   ?                           ?                        ?                       ?
-   ? host.RunAsync()           ?                        ?                       ?
-   ???????????????????????????>?                        ?                       ?
-   ?                           ? StartAsync()           ?                       ?
-   ?                           ?                        ?                       ?
-   ?                           ? WaitUntilAvailable()   ?                       ?
-   ?                           ????????????????????????>?                       ?
-   ?                           ?                        ??? REST polls ??> X-Plane
-   ?                           ?                        ?<?? 200 OK ??????
-   ?                           ?<???????????????????????                       ?
-   ?                           ?                        ?                       ?
-   ?                           ? connector.Start()      ?                       ?
-   ?                           ????????????????????????>?                       ?
-   ?                           ?                        ??? WS connect ??> X-Plane
-   ?                           ?                        ?                       ?
-   ?                           ? panel.ConnectAsync()   ?                       ?
-   ?                           ???????????????????????????????????????????????>?
-   ?                           ?                        ?                       ?
-   ?                           ?                        ?       SerialPort.Open()?
-   ?                           ?                        ?                       ?
-   ?                           ?                        ?  SubscribeToDataRefs() ?
-   ?                           ?                        ?<???????????????????????
-   ?                           ?                        ? (50+ SubscribeAsync    ?
-   ?                           ?                        ?  calls with callbacks) ?
-   ?                           ?                        ?                       ?
-   ?                           ?                        ??? REST resolve IDs ??>?
-   ?                           ?                        ??? WS subscribe ??????>?
-   ?                           ?                        ?                       ?
-   ?                           ? "All panels init'd"    ?                       ?
-   ?                           ?                        ?                       ?
+   │                           │                        │                       │
+   │ host.RunAsync()           │                        │                       │
+   │──────────────────────────>│                        │                       │
+   │                           │ StartAsync()           │                       │
+   │                           │                        │                       │
+   │                           │ WaitUntilAvailable()   │                       │
+   │                           │───────────────────────>│                       │
+   │                           │                        │──── REST polls ──> X-Plane
+   │                           │                        │<─── 200 OK ──────│
+   │                           │<──────────────────────│                       │
+   │                           │                        │                       │
+   │                           │ connector.Start()      │                       │
+   │                           │───────────────────────>│                       │
+   │                           │                        │──── WS connect ──> X-Plane
+   │                           │                        │                       │
+   │                           │ panel.ConnectAsync()   │                       │
+   │                           │──────────────────────────────────────────────>│
+   │                           │                        │                       │
+   │                           │                        │       SerialPort.Open()│
+   │                           │                        │                       │
+   │                           │                        │  SubscribeToDataRefs() │
+   │                           │                        │<──────────────────────│
+   │                           │                        │ (50+ SubscribeAsync    │
+   │                           │                        │  calls with callbacks) │
+   │                           │                        │                       │
+   │                           │                        │──── REST resolve IDs ──>│
+   │                           │                        │──── WS subscribe ──────>│
+   │                           │                        │                       │
+   │                           │ "All panels init'd"    │                       │
+   │                           │                        │                       │
 ```
 
 ---
@@ -816,46 +816,46 @@ Program.cs                PanelHostedService       XPlaneWebConnector      OvhPa
 
 ```
 XPlaneWebConnector
-?
-??? Transport
-?   ??? _httpClient                  HttpClient           Shared for all REST calls
-?   ??? _webSocket                   ClientWebSocket?     Current WS connection
-?   ??? _cts                         CancellationTokenSource?  Lifecycle control
-?   ??? _receiveTask                 Task?                Background WS receive
-?
-??? Caches (populated lazily, cleared on StopAsync)
-?   ??? _dataRefIdCache              ConcurrentDictionary<string, long>
-?   ?                                "sim/.../heading" ? 42
-?   ??? _commandIdCache              ConcurrentDictionary<string, long>
-?                                    "sim/autopilot/heading_up" ? 100
-?
-??? Subscriptions (populated by SubscribeAsync, cleared on StopAsync)
-?   ??? _subscriptions               ConcurrentDictionary<(long Id, int Index),
-?   ?                                  (SimDataRef, Action<SimDataRef, float>)>
-?   ?                                (42, -1) ? (element, callback)   // scalar
-?   ?                                (42,  7) ? (element, callback)   // array index
-?   ?
-?   ??? _stringSubscriptions         ConcurrentDictionary<(long Id, int Index),
-?   ?                                  (SimStringDataRef, Action<SimStringDataRef, string>)>
-?   ?
-?   ??? _subscribedIndices           ConcurrentDictionary<long, SortedSet<int>>
-?   ?                                42 ? { 1, 3, 7 }  // tracks which indices
-?   ?                                                   // are subscribed per ID
-?   ?
-?   ??? _commandSubscriptions        ConcurrentDictionary<long, Action<long, bool>>
-?                                    100 ? callback(id, isActive)
-?
-??? Message Pipeline
-?   ??? _incomingMessages            Channel<byte[]>(50, DropOldest)
-?   ?                                Decouples WS read from callback dispatch
-?   ??? _nextReqId                   int (Interlocked.Increment)
-?
-??? Configuration (immutable after construction)
-    ??? _baseUrl                     "http://host:port/api/v3"
-    ??? _wsUrl                       "ws://host:port/api/v3"
-    ??? _capabilitiesUrl             "http://host:port/api/capabilities"
-    ??? _readinessProbeDataRef       string? (optional plugin dataref to wait for)
-    ??? _readinessProbeMaxRetries    int (0 = unlimited)
+│
+├── Transport
+│   ├── _httpClient                  HttpClient           Shared for all REST calls
+│   ├── _webSocket                   ClientWebSocket?     Current WS connection
+│   ├── _cts                         CancellationTokenSource?  Lifecycle control
+│   └── _receiveTask                 Task?                Background WS receive
+│
+├── Caches (populated lazily, cleared on StopAsync)
+│   ├── _dataRefIdCache              ConcurrentDictionary<string, long>
+│   │                                "sim/.../heading" → 42
+│   └── _commandIdCache              ConcurrentDictionary<string, long>
+│                                    "sim/autopilot/heading_up" → 100
+│
+├── Subscriptions (populated by SubscribeAsync, cleared on StopAsync)
+│   ├── _subscriptions               ConcurrentDictionary<(long Id, int Index),
+│   │                                  (SimDataRef, Action<SimDataRef, float>)>
+│   │                                (42, -1) → (element, callback)   // scalar
+│   │                                (42,  7) → (element, callback)   // array index
+│   │
+│   ├── _stringSubscriptions         ConcurrentDictionary<(long Id, int Index),
+│   │                                  (SimStringDataRef, Action<SimStringDataRef, string>)>
+│   │
+│   ├── _subscribedIndices           ConcurrentDictionary<long, SortedSet<int>>
+│   │                                42 → { 1, 3, 7 }  // tracks which indices
+│   │                                                   // are subscribed per ID
+│   │
+│   └── _commandSubscriptions        ConcurrentDictionary<long, Action<long, bool>>
+│                                    100 → callback(id, isActive)
+│
+├── Message Pipeline
+│   ├── _incomingMessages            Channel<byte[]>(50, DropOldest)
+│   │                                Decouples WS read from callback dispatch
+│   └── _nextReqId                   int (Interlocked.Increment)
+│
+└── Configuration (immutable after construction)
+    ├── _baseUrl                     "http://host:port/api/v3"
+    ├── _wsUrl                       "ws://host:port/api/v3"
+    ├── _capabilitiesUrl             "http://host:port/api/capabilities"
+    ├── _readinessProbeDataRef       string? (optional plugin dataref to wait for)
+    └── _readinessProbeMaxRetries    int (0 = unlimited)
 ```
 
 ---
