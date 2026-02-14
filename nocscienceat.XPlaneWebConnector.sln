@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 18
+VisualStudioVersion = 18.2.11408.102 d18.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "nocscienceat.XPlaneWebConnector", "nocscienceat.XPlaneWebConnector.csproj", "{2A99D07B-19EB-827C-4ED9-02BE3B74F092}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{2A99D07B-19EB-827C-4ED9-02BE3B74F092}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2A99D07B-19EB-827C-4ED9-02BE3B74F092}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2A99D07B-19EB-827C-4ED9-02BE3B74F092}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2A99D07B-19EB-827C-4ED9-02BE3B74F092}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {7D50F9F7-EACB-4DEC-8BEC-536D375E954A}
+	EndGlobalSection
+EndGlobal
