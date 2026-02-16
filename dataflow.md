@@ -94,9 +94,9 @@ The three interfaces are implemented by a single class (`XPlaneWebConnector`) bu
  │ SubscribeAsync()        │  │ GetDataRefCountAsync()   │  │ ConnectionClosed event   │
  │ SetDataRefValueAsync()  │  │ GetDataRefValueAsync()   │  └──────────────────────────┘
  │ SendCommandAsync()      │  │ SetDataRefValueByIdAs()  │
- │ Dispose()               │  │ SetDataRefValuesByWs()   │
- └─────────────────────────┘  │ ListCommandsAsync()      │
-                              │ GetCommandCountAsync()   │
+ │ SendCommandAsync(,dur)  │  │ SetDataRefValuesByWs()   │
+ │ Dispose()               │  │ ListCommandsAsync()      │
+ └─────────────────────────┘  │ GetCommandCountAsync()   │
                               │ ActivateCommandAsync()   │
                               │ StartFlightAsync()       │
                               │ UpdateFlightAsync()      │
@@ -266,6 +266,10 @@ Consumer                         Library                                      X-
 
 ### 5.2 Set Dataref Value (High-Level)
 
+The transport used is determined by the `CommandSetDataRefTransport` passed to the constructor.
+
+#### Transport: WebSocket (default)
+
 ```
 Consumer                                 Library                          X-Plane
    │                                        │                                │
@@ -286,9 +290,40 @@ Consumer                                 Library                          X-Plan
    │                                        │                                │
 ```
 
+#### Transport: Http
+
+```
+Consumer                                 Library                          X-Plane
+   │                                        │                                │
+   │ SetDataRefValueAsync("path[3]", 1.0f)  │                                │
+   │───────────────────────────────────────>│                                │
+   │                                        │  ParseDataRefPath → (path, 3)  │
+   │                                        │  ResolveDataRefIdAsync(path)   │
+   │                                        │  → id (from cache or REST)     │
+   │                                        │                                │
+   │                                        │  SetDataRefValueByIdAsync()    │
+   │                                        │  ├─ [fireForget=false]          │
+   │                                        │  │  PATCH /datarefs/42/value   │
+   │                                        │  │    ?index=3                 │
+   │                                        │  │  ───────────────────────>   │
+   │                                        │  │  ←── 200 OK ───────────────│
+   │                                        │  │                             │
+   │                                        │  └─ [fireForget=true]          │
+   │                                        │     _ = FireAndForgetAsync()   │
+   │                                        │     return immediately         │
+   │                                        │     (errors logged, not thrown)│
+   │                                        │                                │
+```
+
 String datarefs follow the same path but base64-encode the value before sending.
 
 ### 5.3 Send Command (High-Level)
+
+The transport used is determined by the `CommandSetDataRefTransport` passed to the constructor.
+The `SendCommandAsync(command)` overload sends with `duration = 0` (press & release).
+The `SendCommandAsync(command, duration)` overload allows holding the command for 0–10 seconds.
+
+#### Transport: WebSocket (default)
 
 ```
 Consumer                                Library                          X-Plane
@@ -309,11 +344,35 @@ Consumer                                Library                          X-Plane
    │                                       │                                │
 ```
 
+#### Transport: Http
+
+```
+Consumer                                Library                          X-Plane
+   │                                       │                                │
+   │ SendCommandAsync(SimCommand, 0.5f)    │                                │
+   │──────────────────────────────────────>│                                │
+   │                                       │  ResolveCommandIdAsync(name)   │
+   │                                       │  → id (from cache or REST)     │
+   │                                       │                                │
+   │                                       │  ActivateCommandAsync()        │
+   │                                       │  ├─ [fireForget=false]          │
+   │                                       │  │  POST /command/100/activate │
+   │                                       │  │  Body: { "duration": 0.5 }   │
+   │                                       │  │  ──────────────────────>    │
+   │                                       │  │  ←── 200 OK ──────────────│
+   │                                       │  │                             │
+   │                                       │  └─ [fireForget=true]          │
+   │                                       │     _ = FireAndForgetAsync()   │
+   │                                       │     return immediately         │
+   │                                       │                                │
+```
+
 ### 5.4 Outbound Summary
 
 ```
   ┌─────────────────────────────────────────────────────────────────────────┐
   │                    Outbound Data Paths                                  │
+  │    (transport selected by CommandSetDataRefTransport)                    │
   ├─────────────────────────────────────────────────────────────────────────┤
   │                                                                         │
   │ Consumer ──> IXPlaneWebConnector                                        │
@@ -324,11 +383,15 @@ Consumer                                Library                          X-Plane
   │              │                                                          │
   │              ├── SetDataRefValueAsync()                                 │
   │              │     ├─ ResolveDataRefIdAsync() ──── REST GET ──> X-Plane │
-  │              │     └─ SetDataRefValuesByWsAsync() ── WS ──────> X-Plane │
+  │              │     ├─ [WebSocket]  SetDataRefValuesByWsAsync() ─ WS ──> │
+  │              │     └─ [Http]       SetDataRefValueByIdAsync()           │
+  │              │                      └─ PATCH /datarefs/{id}/value ──>  │
   │              │                                                          │
   │              └── SendCommandAsync()                                     │
   │                    ├─ ResolveCommandIdAsync() ──── REST GET ──> X-Plane │
-  │                    └─ SetCommandActiveAsync() ───── WS ───────> X-Plane │
+  │                    ├─ [WebSocket]  SetCommandActiveAsync() ── WS ────>  │
+  │                    └─ [Http]       ActivateCommandAsync()               │
+  │                                    └─ POST /command/{id}/activate ──>  │
   │                                                                         │
   │ Consumer ──> IXPlaneApi                                                 │
   │              │                                                          │
@@ -344,6 +407,13 @@ Consumer                                Library                          X-Plane
   │       → JSON serialize with source-generated context                    │
   │       → ClientWebSocket.SendAsync()                                     │
   │       → No acknowledgement waiting                                      │
+  │                                                                         │
+  │      When fireForgetOnHttpTransport = true, all HTTP write operations   │
+  │       (SetDataRefValueByIdAsync, ActivateCommandAsync,                  │
+  │        StartFlightAsync, UpdateFlightAsync) use the same pattern:       │
+  │       → _ = FireAndForgetAsync() (async local function)                 │
+  │       → Return immediately; errors caught and logged as warnings        │
+  │       → HttpResponseMessage disposed via using declaration              │
   └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -613,6 +683,8 @@ All outbound messages use a common envelope:
 
 ### Fire-and-Forget Design
 
+#### WebSocket sends
+
 ```
 SendWebSocketFireAndForgetAsync<T>(request, jsonTypeInfo)
    │
@@ -626,7 +698,41 @@ SendWebSocketFireAndForgetAsync<T>(request, jsonTypeInfo)
            but never correlated back to requests
 ```
 
-**Why fire-and-forget?** X-Plane does not reliably deliver `result` responses while the receive loop is busy dispatching subscription callbacks. Blocking on acknowledgements would introduce deadlock potential and latency with no practical benefit for real-time cockpit simulation.
+#### HTTP fire-and-forget (when `fireForgetOnHttpTransport = true`)
+
+HTTP write methods (`SetDataRefValueByIdAsync`, `ActivateCommandAsync`,
+`StartFlightAsync`, `UpdateFlightAsync`) use an async local function pattern:
+
+```
+Method(id, value, ...)
+   │
+   ├── Prepare request body, content, URL
+   │
+   ├── _fireForgetOnHttpTransport?
+   │   ├── Yes:
+   │   │   _ = FireAndForgetAsync();   // discard task
+   │   │   return;                     // caller returns immediately
+   │   │
+   │   │   async Task FireAndForgetAsync()
+   │   │   {
+   │   │       try { using var response = await SendAsync(); }
+   │   │       catch (Exception ex) { _logger.LogWarning(...); }
+   │   │   }
+   │   │
+   │   └── No:
+   │       using var response = await SendAsync();
+   │       response.EnsureSuccessStatusCode();
+   │
+   └── Task<HttpResponseMessage> SendAsync()
+       └── Single local function — shared by both paths
+           to avoid code duplication
+```
+
+The local `SendAsync()` function ensures the HTTP call is written once.
+The `using` declaration on `HttpResponseMessage` ensures the response
+stream and underlying connection are returned to the pool promptly.
+
+**Why fire-and-forget?** X-Plane does not reliably deliver `result` responses while the receive loop is busy dispatching subscription callbacks. Blocking on acknowledgements would introduce deadlock potential and latency with no practical benefit for real-time cockpit simulation. For HTTP, the fire-and-forget mode provides similar low-latency semantics when the caller does not need confirmation.
 
 ---
 
@@ -765,6 +871,7 @@ Hardware              OvhPanelHandler               Library                    X
    │                         │                         │ ResolveCommandIdAsync    │
    │                         │                         │ → cache hit (id=100)     │
    │                         │                         │                          │
+   │                         │                         │ [WebSocket transport]     │
    │                         │                         │ WS: command_set_is_      │
    │                         │                         │     active               │
    │                         │                         │ { id: 100,               │
@@ -773,6 +880,10 @@ Hardware              OvhPanelHandler               Library                    X
    │                         │                         │─────────────────────────>│
    │                         │                         │                   APU ON │
 ```
+
+> **Note:** When `CommandSetDataRefTransport.Http` is selected, the command
+> is sent via `POST /command/{id}/activate` with `{ "duration": 0 }` instead.
+> If `fireForgetOnHttpTransport` is also enabled, the HTTP call returns immediately.
 
 ### Consumer Startup Sequence
 
@@ -851,24 +962,54 @@ XPlaneWebConnector
 │   └── _nextReqId                   int (Interlocked.Increment)
 │
 └── Configuration (immutable after construction)
-    ├── _baseUrl                     "http://host:port/api/v3"
-    ├── _wsUrl                       "ws://host:port/api/v3"
-    ├── _capabilitiesUrl             "http://host:port/api/capabilities"
-    ├── _readinessProbeDataRef       string? (optional plugin dataref to wait for)
-    └── _readinessProbeMaxRetries    int (0 = unlimited)
+├── _baseUrl                     "http://host:port/api/v3"
+├── _wsUrl                       "ws://host:port/api/v3"
+├── _capabilitiesUrl             "http://host:port/api/capabilities"
+├── _transport                   CommandSetDataRefTransport (WebSocket or Http)
+├── _fireForgetOnHttpTransport   bool — when true, HTTP writes return immediately
+├── _readinessProbeDataRef       string? (optional plugin dataref to wait for)
+└── _readinessProbeMaxRetries    int (0 = unlimited)
 ```
 
 ---
 
 ## 14. Design Decisions & Trade-offs
 
+### Selectable transport (`CommandSetDataRefTransport`)
+
+**Decision:** A single `CommandSetDataRefTransport` enum controls how both `SendCommandAsync` and `SetDataRefValueAsync` communicate with X-Plane. The choice is set once at construction time.
+
+**Rationale:** The X-Plane API offers both WebSocket and REST for writing datarefs and activating commands. WebSocket is lower-latency (persistent connection, no HTTP overhead) but provides only fire-and-forget semantics. HTTP REST is stateless and returns immediate error feedback via HTTP status codes, which can be valuable for debugging or when a WebSocket connection is not needed for subscriptions.
+
+**Trade-off:** A single enum controls both operations together. If an application wanted WebSocket for datarefs but HTTP for commands (or vice versa), it would need two separate connector instances or a more granular configuration. In practice, the same transport works well for both.
+
+| | WebSocket | Http |
+|---|---|---|
+| Commands | WS `command_set_is_active` | POST `/command/{id}/activate` |
+| Dataref writes | WS `dataref_set_values` | PATCH `/datarefs/{id}/value` |
+| Latency | Lower (persistent connection) | Higher (new HTTP request per write) |
+| Batching | ✅ multiple entries per frame | ❌ one request per write |
+| Error feedback | Unreliable ("result" may be missed) | Immediate HTTP status codes (unless fire-and-forget) |
+| Fire-and-forget | Always (by design) | Optional via `fireForgetOnHttpTransport` |
+| Requires WS connection | Yes | No — fully stateless |
+
 ### Fire-and-forget sends
 
-**Decision:** WebSocket sends never wait for a `result` response.
+**Decision:** WebSocket sends never wait for a `result` response. HTTP write operations optionally run fire-and-forget when `fireForgetOnHttpTransport` is enabled.
 
-**Rationale:** X-Plane does not reliably deliver results while processing subscription updates. Blocking would introduce deadlocks (the receive task waiting for a result that can't be delivered because the processing task is blocked waiting for the send to complete).
+**Rationale:** X-Plane does not reliably deliver results while processing subscription updates. Blocking would introduce deadlocks (the receive task waiting for a result that can't be delivered because the processing task is blocked waiting for the send to complete). For HTTP, fire-and-forget mode reduces latency for high-frequency writes where the caller does not need confirmation.
 
-**Trade-off:** Errors in outbound messages are only discovered via the logged `result` messages — never raised to the caller.
+**Implementation:** HTTP fire-and-forget uses an async local function (`FireAndForgetAsync`) paired with a shared `SendAsync()` local function. The local function catches all exceptions and logs them as warnings. The `HttpResponseMessage` is always disposed via a `using` declaration to ensure connections are returned to the pool promptly.
+
+**Trade-off:** Errors in outbound messages are only discovered via log output — never raised to the caller. When `fireForgetOnHttpTransport` is `false`, the HTTP response is awaited and validated with `EnsureSuccessStatusCode()`.
+
+### HttpResponseMessage disposal
+
+**Decision:** All `HttpResponseMessage` instances are wrapped in `using` declarations.
+
+**Rationale:** `HttpResponseMessage` implements `IDisposable` and holds a reference to the response content stream. Without disposal, the stream stays alive until GC, delaying the return of the connection to the `HttpClient` pool. Under high-frequency writes this can exhaust the connection pool.
+
+**Trade-off:** None — this is a pure correctness fix with no downside.
 
 ### Bounded channel with DropOldest
 
@@ -904,4 +1045,4 @@ XPlaneWebConnector
 
 ---
 
-*This document reflects the library as of version 1.0.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*
+*This document reflects the library as of version 1.1.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*

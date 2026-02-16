@@ -10,7 +10,8 @@ Provides a high-level interface for subscribing to datarefs, setting dataref val
 
 - **WebSocket dataref subscriptions** — receive real-time value updates with callbacks
 - **Dataref writes** — set numeric and string datarefs by path or `SimDataRef` instance
-- **Command execution** — send one-shot commands or control begin/end activation
+- **Command execution** — send one-shot commands or control begin/end activation, with optional hold duration
+- **Selectable transport** — choose between WebSocket or HTTP (REST) for commands and dataref writes via `CommandSetDataRefTransport`
 - **Full REST API** — list/query datarefs and commands, read values, manage flights
 - **Automatic reconnection** — recovers from transient WebSocket disconnections
 - **Readiness probe** — optionally wait for a specific plugin dataref before proceeding
@@ -39,7 +40,7 @@ using var loggerFactory = LoggerFactory.Create(b => b.AddConsole());
 var logger = loggerFactory.CreateLogger<XPlaneWebConnector>();
 
 // Create and start the connector
-var connector = new XPlaneWebConnector("localhost", 8086, logger);
+var connector = new XPlaneWebConnector("localhost", 8086, CommandSetDataRefTransport.WebSocket, fireForgetOnHttpTransport: false, logger, httpClientFactory);
 connector.Start();
 
 // Subscribe to a dataref
@@ -82,6 +83,7 @@ The library exposes three interfaces, all implemented by `XPlaneWebConnector`:
 | `SimDataRef` | Numeric dataref reference — holds the path and the latest `float` value |
 | `SimStringDataRef` | String/data-type dataref reference — holds the path and the latest `string` value |
 | `SimCommand` | Command reference — holds the command path and an optional description |
+| `CommandSetDataRefTransport` | Enum selecting the transport for commands and dataref writes: `WebSocket` (default) or `HttpPost` |
 
 ## Usage
 
@@ -89,13 +91,33 @@ The library exposes three interfaces, all implemented by `XPlaneWebConnector`:
 
 ```csharp
 var connector = new XPlaneWebConnector(
-    host: "localhost",             // X-Plane host
-    port: 8086,                    // X-Plane web API port
-    logger: logger,                // ILogger<XPlaneWebConnector>
-    readinessProbeDataRef: null,   // Optional: wait for this dataref to exist before ready
-    readinessProbeMaxRetries: 0    // Optional: max retries for readiness probe (0 = unlimited)
+    host: "localhost",                                   // X-Plane host
+    port: 8086,                                          // X-Plane web API port
+    commandTransport: CommandSetDataRefTransport.WebSocket, // Transport for commands & dataref writes
+    fireForgetOnHttpTransport: false,                     // When true, HTTP writes return immediately without awaiting the response
+    logger: logger,                                      // ILogger<XPlaneWebConnector>
+    httpClientFactory: httpClientFactory,                 // IHttpClientFactory for REST calls
+    readinessProbeDataRef: null,                          // Optional: wait for this dataref to exist before ready
+    readinessProbeMaxRetries: 0                           // Optional: max retries for readiness probe (0 = unlimited)
 );
 ```
+
+#### Transport Selection
+
+The `CommandSetDataRefTransport` enum controls how `SendCommandAsync` and `SetDataRefValueAsync` communicate with X-Plane:
+
+| Transport | Commands | Dataref Writes |
+|---|---|---|
+| `WebSocket` (default) | WS `command_set_is_active` | WS `dataref_set_values` |
+| `Http` | HTTP POST `/command/{id}/activate` | HTTP PATCH `/datarefs/{id}/value` |
+
+WebSocket is lower-latency (persistent connection), while HTTP is stateless and provides immediate error feedback via HTTP status codes.
+
+#### Fire-and-Forget HTTP Mode
+
+When `fireForgetOnHttpTransport` is `true` and the transport is `Http`, all write operations (dataref sets, command activations, flight start/update) return immediately without awaiting the HTTP response. Errors are logged as warnings but never propagated to the caller. This minimises latency for high-frequency writes where the caller does not need confirmation.
+
+When `false` (default), the HTTP response is awaited and `EnsureSuccessStatusCode()` is called, so failures surface as exceptions.
 
 ### Lifecycle
 
@@ -133,7 +155,7 @@ With a **readiness probe** configured, the connector also waits for a specific p
 
 ```csharp
 var connector = new XPlaneWebConnector(
-    "localhost", 8086, logger,
+    "localhost", 8086, CommandSetDataRefTransport.WebSocket, logger, httpClientFactory,
     readinessProbeDataRef: "AirbusFBW/EnableExternalPower",
     readinessProbeMaxRetries: 30
 );
@@ -193,9 +215,13 @@ await connector.SetDataRefValueAsync("sim/aircraft/view/acf_tailnum", "D-ABCD");
 ### Sending Commands
 
 ```csharp
-// One-shot command
+// One-shot command (press & immediate release, duration = 0)
 var gearToggle = new SimCommand("sim/flight_controls/landing_gear_toggle");
 await connector.SendCommandAsync(gearToggle);
+
+// Command with a specific hold duration (0–10 seconds)
+var fireTest = new SimCommand("sim/annunciator/fire_test");
+await connector.SendCommandAsync(fireTest, duration: 3.0f);
 
 // With description (for documentation purposes)
 var apDisconnect = new SimCommand(
@@ -282,12 +308,15 @@ Register the connector in a DI container (e.g. with `Microsoft.Extensions.Hostin
 
 ```csharp
 builder.Services.AddSingleton<XPlaneWebConnector>(sp =>
-    new XPlaneWebConnector(
-        "localhost", 8086,
-        sp.GetRequiredService<ILogger<XPlaneWebConnector>>(),
-        readinessProbeDataRef: "AirbusFBW/EnableExternalPower",
-        readinessProbeMaxRetries: 30
-    ));
+new XPlaneWebConnector(
+    "localhost", 8086,
+    CommandSetDataRefTransport.Http,      // or WebSocket
+    fireForgetOnHttpTransport: true,      // fire-and-forget HTTP writes
+    sp.GetRequiredService<ILogger<XPlaneWebConnector>>(),
+    sp.GetRequiredService<IHttpClientFactory>(),
+    readinessProbeDataRef: "AirbusFBW/EnableExternalPower",
+    readinessProbeMaxRetries: 30
+));
 
 builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
     sp.GetRequiredService<XPlaneWebConnector>());
@@ -341,7 +370,9 @@ builder.Services.AddSingleton<IXPlaneApi>(sp =>
 
 **Key design decisions:**
 
-- **Fire-and-forget WebSocket sends** — X-Plane does not reliably deliver result responses while the receive loop is dispatching callbacks, so outbound messages never block waiting for acknowledgements.
+- **Selectable transport** — `CommandSetDataRefTransport` controls whether commands and dataref writes use WebSocket (`command_set_is_active` / `dataref_set_values`) or HTTP REST (`POST /command/{id}/activate` / `PATCH /datarefs/{id}/value`). WebSocket is lower-latency; HTTP provides immediate error feedback.
+- **Fire-and-forget sends** — WebSocket sends never block waiting for acknowledgements. When `fireForgetOnHttpTransport` is enabled, HTTP write operations also return immediately; errors are caught and logged by an async local function without propagating to the caller.
+- **Proper resource disposal** — all `HttpResponseMessage` instances are disposed via `using` declarations to promptly return connections to the pool.
 - **Decoupled receive and processing** — WebSocket frames are read as fast as possible into a bounded `Channel<byte[]>`; a separate background task drains the queue and invokes callbacks. This ensures slow consumers (e.g. serial port writes) never stall the WebSocket read.
 - **Lazy ID resolution with caching** — dataref and command names are resolved to session IDs via REST on first use and cached for the lifetime of the connection.
 - **Automatic reconnection** — if the WebSocket connection drops, the connector retries once after 3 seconds before signalling `ConnectionClosed`.

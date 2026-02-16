@@ -1,4 +1,6 @@
-namespace nocscienceat.XPlaneWebConnector;
+using nocscienceat.XPlaneWebConnector.Models;
+
+namespace nocscienceat.XPlaneWebConnector.Interfaces;
 
 /// <summary>
 /// Abstraction for communicating with X-Plane.
@@ -48,5 +50,14 @@ public interface IXPlaneWebConnector : IDisposable
 
     /// <summary>Sends a one-shot command to X-Plane.</summary>
     Task SendCommandAsync(SimCommand command);
+
+    /// <summary>
+    /// Sends a command to X-Plane with a specific hold duration (0–10 seconds).
+    /// When using <see cref="CommandTransport.HttpPost"/>, this maps directly to
+    /// POST /command/{id}/activate with the given duration.
+    /// When using <see cref="CommandTransport.WebSocket"/>, a duration of 0 sends
+    /// a single active+release; a non-zero duration is passed to command_set_is_active.
+    /// </summary>
+    Task SendCommandAsync(SimCommand command, float duration);
 }
 

@@ -1,4 +1,4 @@
-namespace nocscienceat.XPlaneWebConnector;
+namespace nocscienceat.XPlaneWebConnector.Interfaces;
 
 /// <summary>
 /// Checks whether X-Plane's web API is available and ready.

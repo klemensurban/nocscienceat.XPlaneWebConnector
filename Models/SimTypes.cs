@@ -1,4 +1,4 @@
-namespace nocscienceat.XPlaneWebConnector;
+namespace nocscienceat.XPlaneWebConnector.Models;
 
 /// <summary>
 /// Abstract base for dataref references. Holds the X-Plane dataref path.

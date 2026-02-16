@@ -1,10 +1,12 @@
+using Microsoft.Extensions.Logging;
+using nocscienceat.XPlaneWebConnector.Interfaces;
+using nocscienceat.XPlaneWebConnector.Models;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Channels;
-using Microsoft.Extensions.Logging;
 
 namespace nocscienceat.XPlaneWebConnector;
 
@@ -21,7 +23,9 @@ namespace nocscienceat.XPlaneWebConnector;
 public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi, IXPlaneAvailabilityCheck
 {
     private readonly ILogger<XPlaneWebConnector> _logger;
-    private readonly HttpClient _httpClient;
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly CommandSetDataRefTransport _transport;
+    private readonly bool _fireForgetOnHttpTransport;
     private readonly string _baseUrl;
     private readonly string _wsUrl;
     private readonly string _capabilitiesUrl;
@@ -32,7 +36,9 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
     // Dataref session-ID caches (path ? id). Cleared when X-Plane restarts.
     private readonly ConcurrentDictionary<string, long> _dataRefIdCache = new();
+    private readonly ConcurrentDictionary<long, string> _reverseDataRefIdCache = new();
     private readonly ConcurrentDictionary<string, long> _commandIdCache = new();
+    private readonly ConcurrentDictionary<long, string> _reverseCommandIdCache = new();
 
     // Numeric dataref subscriptions: (sessionId, arrayIndex) ? (element, callback)
     private readonly ConcurrentDictionary<(long Id, int Index), (SimDataRef Element, Action<SimDataRef, float> Callback)> _subscriptions = new();
@@ -69,16 +75,18 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     [GeneratedRegex(@"^(.+)\[(\d+)\]$")]
     private static partial Regex ArrayIndexRegex();
 
-    public XPlaneWebConnector(string host, int port, ILogger<XPlaneWebConnector> logger, string? readinessProbeDataRef = null, int readinessProbeMaxRetries = 0)
+    public XPlaneWebConnector(string host, int port, CommandSetDataRefTransport commandTransport, bool fireForgetOnHttpTransport, ILogger<XPlaneWebConnector> logger, IHttpClientFactory httpClientFactory, 
+        string? readinessProbeDataRef = null, int readinessProbeMaxRetries = 0)
     {
         _logger = logger;
+        _httpClientFactory = httpClientFactory;
         _baseUrl = $"http://{host}:{port}/api/v3";
         _wsUrl = $"ws://{host}:{port}/api/v3";
         _capabilitiesUrl = $"http://{host}:{port}/api/capabilities";
         _readinessProbeDataRef = readinessProbeDataRef;
         _readinessProbeMaxRetries = readinessProbeMaxRetries;
-        _httpClient = new HttpClient();
-        _httpClient.DefaultRequestHeaders.Add("Accept", "application/json");
+        _transport = commandTransport;
+        _fireForgetOnHttpTransport = fireForgetOnHttpTransport;
     }
 
     // ========================================================================
@@ -89,7 +97,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     {
         try
         {
-            var response = await _httpClient.GetAsync(_capabilitiesUrl, cancellationToken);
+            using var response = await _httpClientFactory.CreateClient().GetAsync(_capabilitiesUrl, cancellationToken);
             if (!response.IsSuccessStatusCode)
                 return false;
 
@@ -143,7 +151,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
             try
             {
-                var response = await _httpClient.GetAsync(probeUrl, cancellationToken);
+                using var response = await _httpClientFactory.CreateClient().GetAsync(probeUrl, cancellationToken);
 
                 if (response.IsSuccessStatusCode)
                 {
@@ -272,7 +280,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     }
 
     // ========================================================================
-    // IXPlaneWebConnector: Set dataref value (WebSocket for speed)
+    // IXPlaneWebConnector: Set dataref value (WebSocket or HTTP PATCH)
     // ========================================================================
 
     public async Task SetDataRefValueAsync(SimDataRef dataref, float value)
@@ -290,7 +298,21 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         var (basePath, index) = ParseDataRefPath(dataref);
         var id = await ResolveDataRefIdAsync(basePath);
         using var doc = JsonDocument.Parse(value.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        await SetDataRefValuesByWsAsync([new DataRefSetEntry { Id = id, Value = doc.RootElement.Clone(), Index = index >= 0 ? index : null }]);
+        var jsonValue = doc.RootElement.Clone();
+        var idx = index >= 0 ? index : (int?)null;
+
+        switch (_transport)
+        {
+            case CommandSetDataRefTransport.Http:
+                await SetDataRefValueByIdAsync(id, jsonValue, idx);
+                break;
+
+            case CommandSetDataRefTransport.WebSocket:
+            default:
+                await SetDataRefValuesByWsAsync([new DataRefSetEntry { Id = id, Value = jsonValue, Index = idx }]);
+                break;
+        }
+        _logger.LogInformation("SetDataRefValueAsync Dataref: {dataRef}, Value:{value}", dataref, value);
     }
 
     public async Task SetDataRefValueAsync(string dataref, string value)
@@ -299,19 +321,55 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         var id = await ResolveDataRefIdAsync(basePath);
         var base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
         using var doc = JsonDocument.Parse($"\"{base64}\"");
-        await SetDataRefValuesByWsAsync([new DataRefSetEntry { Id = id, Value = doc.RootElement.Clone(), Index = index >= 0 ? index : null }]);
+        var jsonValue = doc.RootElement.Clone();
+        var idx = index >= 0 ? index : (int?)null;
+
+        switch (_transport)
+        {
+            case CommandSetDataRefTransport.Http:
+                await SetDataRefValueByIdAsync(id, jsonValue, idx);
+                break;
+
+            case CommandSetDataRefTransport.WebSocket:
+            default:
+                await SetDataRefValuesByWsAsync([new DataRefSetEntry { Id = id, Value = jsonValue, Index = idx }]);
+                break;
+        }
+        _logger.LogInformation("SetDataRefValueAsync Dataref: {dataRef}, Value:{value}", dataref, value);
     }
+
+
 
     // ========================================================================
     // IXPlaneWebConnector: Send command (WebSocket for precise begin/end control)
     // ========================================================================
 
-    public async Task SendCommandAsync(SimCommand command)
+    public Task SendCommandAsync(SimCommand command) => SendCommandAsync(command, duration: 0);
+
+    public async Task SendCommandAsync(SimCommand command, float duration)
     {
+        if (duration is < 0 or > 10)
+            throw new ArgumentOutOfRangeException(nameof(duration), duration, "Duration must be between 0 and 10 seconds.");
+
         var id = await ResolveCommandIdAsync(command.Command);
-        await SetCommandActiveAsync(id, true, 0);
-        _logger.LogDebug("Sent command {Name} (id={Id})", command.Command, id);
+
+        switch (_transport)
+        {
+            case CommandSetDataRefTransport.Http:
+                await ActivateCommandAsync(id, duration);
+                break;
+
+            case CommandSetDataRefTransport.WebSocket:
+            default:
+                await SetCommandActiveAsync(id, true, duration);
+                break;
+        }
+
+        _logger.LogDebug("Sent command {Name} (id={Id}, transport={Transport}, duration={Duration}s)",
+            command.Command, id, _transport, duration);
     }
+
+    
 
     // ========================================================================
     // WebSocket connection and receive loop
@@ -382,6 +440,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         }
     }
 
+
     /// <summary>
     /// Reads WebSocket frames as fast as possible and enqueues them for
     /// processing.  Never calls user callbacks — that happens on the
@@ -393,26 +452,76 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
         while (_webSocket?.State == WebSocketState.Open && !ct.IsCancellationRequested)
         {
-            using var ms = new MemoryStream();
-            WebSocketReceiveResult result;
-
-            do
-            {
-                result = await _webSocket.ReceiveAsync(buffer, ct);
-                ms.Write(buffer, 0, result.Count);
-            }
-            while (!result.EndOfMessage);
+            var result = await _webSocket.ReceiveAsync(buffer, ct);
 
             if (result.MessageType == WebSocketMessageType.Close)
             {
-                _logger.LogInformation("WebSocket closed by server");
                 ConnectionClosed?.Invoke();
                 return;
             }
 
-            // Enqueue for processing; if the channel is full the oldest
-            // (most stale) message is dropped automatically.
-            _incomingMessages.Writer.TryWrite(ms.ToArray());
+            byte[] messageBytes;
+
+            if (result.EndOfMessage)
+            {
+                // Fast path: single-frame message (most common).
+                // One exact-size allocation, no MemoryStream, no ToArray() copy.
+                messageBytes = GC.AllocateUninitializedArray<byte>(result.Count);
+                buffer.AsSpan(0, result.Count).CopyTo(messageBytes);
+            }
+            else
+            {
+                // Slow path: multi-frame message — assemble with ArrayPool
+                messageBytes = await AssembleMultiFrameMessageAsync(buffer, result.Count, ct);
+            }
+
+            _incomingMessages.Writer.TryWrite(messageBytes);
+        }
+    }
+
+    /// <summary>
+    /// Assembles a multi-frame WebSocket message using pooled buffers
+    /// for intermediate storage. Returns an exact-size byte[].
+    /// </summary>
+    private async Task<byte[]> AssembleMultiFrameMessageAsync(byte[] buffer, int firstFrameCount, CancellationToken ct)
+    {
+        var pool = System.Buffers.ArrayPool<byte>.Shared;
+        var assembled = pool.Rent(buffer.Length * 2);
+        int totalLength = 0;
+
+        try
+        {
+            // Copy first frame data
+            buffer.AsSpan(0, firstFrameCount).CopyTo(assembled);
+            totalLength = firstFrameCount;
+
+            WebSocketReceiveResult result;
+            do
+            {
+                result = await _webSocket!.ReceiveAsync(buffer, ct);
+
+                // Grow pooled buffer if needed
+                if (totalLength + result.Count > assembled.Length)
+                {
+                    var larger = pool.Rent((totalLength + result.Count) * 2);
+                    assembled.AsSpan(0, totalLength).CopyTo(larger);
+                    pool.Return(assembled);
+                    assembled = larger;
+                }
+
+                buffer.AsSpan(0, result.Count).CopyTo(assembled.AsSpan(totalLength));
+                totalLength += result.Count;
+            }
+            while (!result.EndOfMessage);
+
+            // Exact-size copy for the channel (pooled buffer is returned below)
+            var final = GC.AllocateUninitializedArray<byte>(totalLength);
+            assembled.AsSpan(0, totalLength).CopyTo(final);
+            return final;
+        }
+        finally
+        {
+            pool.Return(assembled);
         }
     }
 
@@ -447,6 +556,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     private void ProcessIncomingMessage(byte[] messageBytes)
     {
         using var doc = JsonDocument.Parse(messageBytes);
+        
         var root = doc.RootElement;
 
         if (!root.TryGetProperty("type", out var typeProp))
@@ -470,7 +580,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 break;
 
             default:
-                _logger.LogDebug("Unhandled WebSocket message type: {Type}", typeProp.GetString());
+                _logger.LogInformation("Unhandled WebSocket message type: {Type}", typeProp.GetString());
                 break;
         }
     }
@@ -511,6 +621,9 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     {
         if (_subscriptions.TryGetValue((id, -1), out var sub))
         {
+            if (_reverseDataRefIdCache.TryGetValue(id, out string name))            {
+                _logger.LogDebug("Received scalar update for dataref {Name} (id={Id}): {Value}", name, id, value);
+            }
             sub.Element.Value = value;
             try { sub.Callback(sub.Element, value); }
             catch (Exception ex) { _logger.LogWarning(ex, "Error in dataref callback for id {Id}", id); }
@@ -522,8 +635,13 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         // Check for string subscriptions first (data-type datarefs sent as arrays)
         if (_stringSubscriptions.TryGetValue((id, -1), out var strSub))
         {
-            var decoded = DecodeBase64ArrayToString(arrayElement);
+            var decoded = DecodeByteArrayToString(arrayElement);
             strSub.Element.Value = decoded;
+            if (_reverseDataRefIdCache.TryGetValue(id, out string name))
+            {
+                _logger.LogDebug("Received array update(string) for dataref {Name} (id={Id}): {Value}", name, id, decoded);
+            }
+
             try { strSub.Callback(strSub.Element, decoded); }
             catch (Exception ex) { _logger.LogWarning(ex, "Error in string dataref callback for id {Id}", id); }
             return;
@@ -544,6 +662,11 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
                 if (_subscriptions.TryGetValue((id, idx), out var sub))
                 {
+                    if (_reverseDataRefIdCache.TryGetValue(id, out string name))
+                    {
+                        if (name != "AirbusFBW/BatVolts")
+                            _logger.LogDebug("Received array update(indexed) for dataref {Name} (id={Id}), Index {idx} : {Value}", name, id, idx, val );
+                    }
                     sub.Element.Value = val;
                     try { sub.Callback(sub.Element, val); }
                     catch (Exception ex) { _logger.LogWarning(ex, "Error in dataref callback for id {Id}[{Index}]", id, idx); }
@@ -561,6 +684,10 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 {
                     var val = (float)element.GetDouble();
                     sub.Element.Value = val;
+                    if (_reverseDataRefIdCache.TryGetValue(id, out string name))
+                    {
+                        _logger.LogDebug("Received array update(full) for dataref {Name} (id={Id})  : {Value}", name, id, val);
+                    }
                     try { sub.Callback(sub.Element, val); }
                     catch (Exception ex) { _logger.LogWarning(ex, "Error in dataref callback for id {Id}[{Index}]", id, pos); }
                 }
@@ -577,13 +704,17 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
         if (_stringSubscriptions.TryGetValue((id, -1), out var sub))
         {
+            if (_reverseDataRefIdCache.TryGetValue(id, out string name))
+            {
+                _logger.LogDebug("Received string for dataref {Name} (id={Id}): {Value}", name, id, decoded);
+            }
             sub.Element.Value = decoded;
             try { sub.Callback(sub.Element, decoded); }
             catch (Exception ex) { _logger.LogWarning(ex, "Error in string dataref callback for id {Id}", id); }
         }
     }
 
-    private static string DecodeBase64ArrayToString(JsonElement arrayElement)
+    private static string DecodeByteArrayToString(JsonElement arrayElement)
     {
         // data-type arrays: each element is a byte ? reassemble and decode
         var bytes = new byte[arrayElement.GetArrayLength()];
@@ -614,6 +745,10 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 continue;
 
             var isActive = prop.Value.ValueKind == JsonValueKind.True;
+            if (_reverseCommandIdCache.TryGetValue(id, out string path))
+            {
+                _logger.LogDebug("Received HandleCommand for Commandpath {Name} (id={Id}):  active={active}", path , id, isActive);
+            }
             try { callback(id, isActive); }
             catch (Exception ex) { _logger.LogWarning(ex, "Error in command callback for id {Id}", id); }
         }
@@ -648,7 +783,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             return cachedId;
 
         var url = $"{_baseUrl}/datarefs?filter[name]={Uri.EscapeDataString(dataRefPath)}&fields=id,name";
-        var response = await _httpClient.GetAsync(url);
+        using var response = await _httpClientFactory.CreateClient().GetAsync(url);
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync();
@@ -659,6 +794,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
         var id = result.Data[0].Id;
         _dataRefIdCache[dataRefPath] = id;
+        _reverseDataRefIdCache[id] = dataRefPath;
         _logger.LogDebug("Resolved dataref {Name} ? id {Id}", dataRefPath, id);
         return id;
     }
@@ -669,7 +805,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             return cachedId;
 
         var url = $"{_baseUrl}/commands?filter[name]={Uri.EscapeDataString(commandPath)}&fields=id,name";
-        var response = await _httpClient.GetAsync(url);
+        using var response = await _httpClientFactory.CreateClient().GetAsync(url);
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync();
@@ -680,7 +816,8 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
         var id = result.Data[0].Id;
         _commandIdCache[commandPath] = id;
-        _logger.LogInformation("Resolved command {Name} ? id {Id}", commandPath, id);
+        _reverseCommandIdCache[id] = commandPath;
+        _logger.LogDebug("Resolved command {Name} ? id {Id}", commandPath, id);
         return id;
     }
 
@@ -690,7 +827,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
     public async Task<XPlaneCapabilitiesResponse?> GetCapabilitiesAsync(CancellationToken ct = default)
     {
-        var response = await _httpClient.GetAsync(_capabilitiesUrl, ct);
+        using var response = await _httpClientFactory.CreateClient().GetAsync(_capabilitiesUrl, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         return await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneCapabilitiesResponse, ct);
@@ -708,7 +845,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         CancellationToken ct = default)
     {
         var url = BuildQueryUrl($"{_baseUrl}/datarefs", filterNames, start, limit, fields);
-        var response = await _httpClient.GetAsync(url, ct);
+        using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo, ct);
@@ -717,7 +854,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
     public async Task<int> GetDataRefCountAsync(CancellationToken ct = default)
     {
-        var response = await _httpClient.GetAsync($"{_baseUrl}/datarefs/count", ct);
+        using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/datarefs/count", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
@@ -727,7 +864,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     public async Task<JsonElement> GetDataRefValueAsync(long id, int? index = null, CancellationToken ct = default)
     {
         var indexParam = index.HasValue ? $"?index={index.Value}" : "";
-        var response = await _httpClient.GetAsync($"{_baseUrl}/datarefs/{id}/value{indexParam}", ct);
+        using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/datarefs/{id}/value{indexParam}", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneValueResponse, ct);
@@ -741,8 +878,28 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
         var indexParam = index.HasValue ? $"?index={index.Value}" : "";
-        var response = await _httpClient.PatchAsync($"{_baseUrl}/datarefs/{id}/value{indexParam}", content, ct);
+        if (_fireForgetOnHttpTransport)
+        {
+            _ = FireAndForgetAsync();
+            return;
+
+            async Task FireAndForgetAsync()
+            {
+                try
+                {
+                    using var response = await SendAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to set dataref value via HTTP for id {Id}{Index}", id, index.HasValue ? $"[index={index.Value}]" : "");
+                }
+            }
+        }
+
+        using var response = await SendAsync();
         response.EnsureSuccessStatusCode();
+
+        Task<HttpResponseMessage> SendAsync() => _httpClientFactory.CreateClient().PatchAsync($"{_baseUrl}/datarefs/{id}/value{indexParam}", content, ct);
     }
 
     // ========================================================================
@@ -812,7 +969,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         CancellationToken ct = default)
     {
         var url = BuildQueryUrl($"{_baseUrl}/commands", filterNames, start, limit, fields);
-        var response = await _httpClient.GetAsync(url, ct);
+        using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneListResponseXPlaneCommandInfo, ct);
@@ -821,7 +978,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
     public async Task<int> GetCommandCountAsync(CancellationToken ct = default)
     {
-        var response = await _httpClient.GetAsync($"{_baseUrl}/commands/count", ct);
+        using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/commands/count", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
@@ -834,8 +991,29 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         var json = JsonSerializer.SerializeToUtf8Bytes(body, XPlaneJsonContext.Default.CommandActivateBody);
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-        var response = await _httpClient.PostAsync($"{_baseUrl}/command/{id}/activate", content, ct);
+        if (_fireForgetOnHttpTransport)
+        {
+            _ = FireAndForgetAsync();
+            return;
+
+            async Task FireAndForgetAsync()
+            {
+                try
+                {
+                    using var response = await SendAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to activate command via HTTP for id {Id}", id);
+                }
+
+            }
+        }
+
+        using var response = await SendAsync();
         response.EnsureSuccessStatusCode();
+
+        Task<HttpResponseMessage> SendAsync() => _httpClientFactory.CreateClient().PostAsync($"{_baseUrl}/command/{id}/activate", content);
     }
 
     // ========================================================================
@@ -848,8 +1026,29 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         var json = JsonSerializer.SerializeToUtf8Bytes(body, XPlaneJsonContext.Default.FlightBody);
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-        var response = await _httpClient.PostAsync($"{_baseUrl}/flight", content, ct);
+
+        if (_fireForgetOnHttpTransport)
+        {
+            _ = FireAndForgetAsync();
+            return;
+
+            async Task FireAndForgetAsync()
+            {
+                try
+                {
+                    using var response = await SendAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed StartFlightAsync");
+                }
+            }
+        }
+
+        using var response = await SendAsync();
         response.EnsureSuccessStatusCode();
+
+        Task<HttpResponseMessage> SendAsync() => _httpClientFactory.CreateClient().PostAsync($"{_baseUrl}/flight", content, ct);
     }
 
     public async Task UpdateFlightAsync(JsonElement flightData, CancellationToken ct = default)
@@ -858,8 +1057,29 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         var json = JsonSerializer.SerializeToUtf8Bytes(body, XPlaneJsonContext.Default.FlightBody);
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-        var response = await _httpClient.PatchAsync($"{_baseUrl}/flight", content, ct);
+
+        if (_fireForgetOnHttpTransport)
+        {
+            _ = FireAndForgetAsync();
+            return;
+
+            async Task FireAndForgetAsync()
+            {
+                try
+                {
+                    using var response = await SendAsync();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed UpdateFlightAsync");
+                }
+            }
+        }
+
+        using var response = await SendAsync();
         response.EnsureSuccessStatusCode();
+
+        Task<HttpResponseMessage> SendAsync() => _httpClientFactory.CreateClient().PatchAsync($"{_baseUrl}/flight", content, ct);
     }
 
     // ========================================================================
@@ -964,6 +1184,6 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         var ws = Interlocked.Exchange(ref _webSocket, null);
         ws?.Dispose();
 
-        _httpClient.Dispose();
+
     }
 }

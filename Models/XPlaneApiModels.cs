@@ -4,6 +4,22 @@ using System.Text.Json.Serialization;
 namespace nocscienceat.XPlaneWebConnector;
 
 // ========================================================================
+// Command transport selection
+// ========================================================================
+
+/// <summary>
+/// Determines how fire-and-forget commands are sent to X-Plane.
+/// </summary>
+public enum CommandSetDataRefTransport
+{
+    /// <summary>Send commands via WebSocket (command_set_is_active). Default.</summary>
+    WebSocket,
+
+    /// <summary>Send commands via HTTP POST /command/{id}/activate.</summary>
+    Http
+}
+
+// ========================================================================
 // REST response models
 // ========================================================================
 

@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace nocscienceat.XPlaneWebConnector;
+namespace nocscienceat.XPlaneWebConnector.Interfaces;
 
 /// <summary>
 /// Full X-Plane 12.1.1+ REST and WebSocket API surface.
