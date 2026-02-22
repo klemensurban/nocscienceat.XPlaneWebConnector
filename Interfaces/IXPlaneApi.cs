@@ -1,4 +1,5 @@
 using System.Text.Json;
+using nocscienceat.XPlaneWebConnector.Models;
 
 namespace nocscienceat.XPlaneWebConnector.Interfaces;
 

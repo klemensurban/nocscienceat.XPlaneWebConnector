@@ -6,7 +6,9 @@ namespace nocscienceat.XPlaneWebConnector.Models;
 public abstract class SimDataRefBase
 {
     /// <summary>X-Plane dataref path (e.g. "sim/cockpit/autopilot/heading", "AirbusFBW/Foo[7]").</summary>
-    public string DataRef { get; init; } = "";
+    public string DataRefPath { get; init; } = "";
+
+    public long TimeSTamp = 0;
 }
 
 /// <summary>

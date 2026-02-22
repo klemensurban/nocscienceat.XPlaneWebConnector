@@ -19,30 +19,30 @@ public interface IXPlaneWebConnector : IDisposable
     Task StopAsync(int timeout = 5000);
 
     // ========================================================================
-    // DataRef subscriptions
+    // DataRefPath subscriptions
     // ========================================================================
 
-    /// <summary>Subscribes to a numeric dataref.</summary>
-    Task SubscribeAsync(SimDataRef dataref, Action<SimDataRef, float>? onchange = null);
+    /// <summary>Subscribes to a numeric dataRef.</summary>
+    Task SubscribeAsync(SimDataRef dataRef, Action<SimDataRef>? onchange = null);
 
-    /// <summary>Subscribes to a string/data-type dataref. Values are base64-decoded from X-Plane.</summary>
-    Task SubscribeAsync(SimStringDataRef dataref, Action<SimStringDataRef, string>? onchange = null);
+    /// <summary>Subscribes to a string/data-type dataRef. Values are base64-decoded from X-Plane.</summary>
+    Task SubscribeAsync(SimStringDataRef dataRef, Action<SimStringDataRef>? onchange = null);
 
     // ========================================================================
-    // DataRef writes
+    // DataRefPath writes
     // ========================================================================
 
-    /// <summary>Sets a dataref value using a SimDataRef.</summary>
-    Task SetDataRefValueAsync(SimDataRef dataref, float value);
+    /// <summary>Sets a dataRef value using a SimDataRef.</summary>
+    Task SetDataRefValueAsync(SimDataRef dataRef, float value);
 
-    /// <summary>Sets a string dataref value using a SimStringDataRef.</summary>
-    Task SetDataRefValueAsync(SimStringDataRef dataref, string value);
+    /// <summary>Sets a string dataRef value using a SimStringDataRef.</summary>
+    Task SetDataRefValueAsync(SimStringDataRef dataRef, string value);
 
-    /// <summary>Sets a numeric dataref value by path.</summary>
-    Task SetDataRefValueAsync(string dataref, float value);
+    /// <summary>Sets a numeric dataRefPath value by path.</summary>
+    Task SetDataRefValueAsync(string dataRefPath, float value);
 
-    /// <summary>Sets a string dataref value by path.</summary>
-    Task SetDataRefValueAsync(string dataref, string value);
+    /// <summary>Sets a string dataRefPath value by path.</summary>
+    Task SetDataRefValueAsync(string dataRefPath, string value);
 
     // ========================================================================
     // Commands

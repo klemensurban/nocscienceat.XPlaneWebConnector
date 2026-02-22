@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace nocscienceat.XPlaneWebConnector;
+namespace nocscienceat.XPlaneWebConnector.Models;
 
 // ========================================================================
 // Command transport selection

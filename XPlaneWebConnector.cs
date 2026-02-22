@@ -2,6 +2,8 @@ using Microsoft.Extensions.Logging;
 using nocscienceat.XPlaneWebConnector.Interfaces;
 using nocscienceat.XPlaneWebConnector.Models;
 using System.Collections.Concurrent;
+using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -33,6 +35,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     private ClientWebSocket? _webSocket;
     private CancellationTokenSource? _cts;
     private Task? _receiveTask;
+    private Task? _callbackTask;
 
     // Dataref session-ID caches (path ? id). Cleared when X-Plane restarts.
     private readonly ConcurrentDictionary<string, long> _dataRefIdCache = new();
@@ -40,27 +43,32 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     private readonly ConcurrentDictionary<string, long> _commandIdCache = new();
     private readonly ConcurrentDictionary<long, string> _reverseCommandIdCache = new();
 
-    // Numeric dataref subscriptions: (sessionId, arrayIndex) ? (element, callback)
-    private readonly ConcurrentDictionary<(long Id, int Index), (SimDataRef Element, Action<SimDataRef, float> Callback)> _subscriptions = new();
+    // Numeric dataRef subscriptions: (sessionId, arrayIndex) ? (element, callbacks)
+    private readonly ConcurrentDictionary<(long Id, int Index), (SimDataRef Element, ImmutableArray<Action<SimDataRef>> Callbacks)> _subscriptions = new();
 
-    // String/data dataref subscriptions: (sessionId, arrayIndex) ? (element, callback)
-    private readonly ConcurrentDictionary<(long Id, int Index), (SimStringDataRef Element, Action<SimStringDataRef, string> Callback)> _stringSubscriptions = new();
+    // String/data dataRef subscriptions: (sessionId, arrayIndex) ? (element, callbacks)
+    private readonly ConcurrentDictionary<(long Id, int Index), (SimStringDataRef Element, ImmutableArray<Action<SimStringDataRef>> Callbacks)> _stringSubscriptions = new();
 
-    // Tracks which array indices are subscribed per dataref ID.
+    // Tracks which array indices are subscribed per dataRef ID.
     // X-Plane sends array updates with values for subscribed indices in sorted order;
     // we need this map to correlate array positions back to the original indices.
     private readonly ConcurrentDictionary<long, SortedSet<int>> _subscribedIndices = new();
 
-    // Command activation subscriptions: command session ID ? callback
-    private readonly ConcurrentDictionary<long, Action<long, bool>> _commandSubscriptions = new();
+    // Command activation subscriptions: command session ID ? callbacks
+    private readonly ConcurrentDictionary<long, ImmutableArray<Action<long, bool>>> _commandSubscriptions = new();
 
     // Monotonically increasing request ID for WebSocket messages
     private int _nextReqId;
 
     // Incoming WebSocket messages are queued here so the receive loop
     // is never blocked by slow callback processing (e.g. serial port writes).
-    private readonly Channel<byte[]> _incomingMessages = Channel.CreateBounded<byte[]>(
-        new BoundedChannelOptions(50) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
+    private readonly Channel<ChannelMessage> _incomingMessages = Channel.CreateBounded<ChannelMessage>(
+        new BoundedChannelOptions(100) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
+
+    private readonly Channel<ChannelMessage> _subscriptionMessages = Channel.CreateUnbounded<ChannelMessage>(
+        new UnboundedChannelOptions {  SingleReader = true });
+
+    private readonly Channel<CallbackItem> _callbacks = Channel.CreateUnbounded<CallbackItem>(new UnboundedChannelOptions { SingleReader = true });
 
     // Readiness probe configuration
     private readonly string? _readinessProbeDataRef;
@@ -70,7 +78,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     public event Action? ConnectionClosed;
 
     /// <summary>
-    /// Regex to extract array index from dataref paths like "AirbusFBW/Foo[7]".
+    /// Regex to extract array index from dataRef paths like "AirbusFBW/Foo[7]".
     /// </summary>
     [GeneratedRegex(@"^(.+)\[(\d+)\]$")]
     private static partial Regex ArrayIndexRegex();
@@ -102,7 +110,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 return false;
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            var caps = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneCapabilitiesResponse, cancellationToken);
+            var caps = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneCapabilitiesResponse, cancellationToken);
             return caps?.Api?.Versions is { Count: > 0 };
         }
         catch (HttpRequestException)
@@ -140,7 +148,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         if (string.IsNullOrEmpty(_readinessProbeDataRef))
             return;
 
-        _logger.LogInformation("Waiting for plugin dataref '{DataRef}' to become available ...", _readinessProbeDataRef);
+        _logger.LogInformation("Waiting for plugin dataRef '{DataRefPath}' to become available ...", _readinessProbeDataRef);
 
         var probeUrl = $"{_baseUrl}/datarefs?filter[name]={Uri.EscapeDataString(_readinessProbeDataRef)}&fields=id";
         int attempt = 0;
@@ -157,11 +165,11 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 {
                     await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
                     var result = await JsonSerializer.DeserializeAsync(
-                        stream, XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo, cancellationToken);
+                        stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo, cancellationToken);
 
                     if (result?.Data is { Count: > 0 })
                     {
-                        _logger.LogInformation("Plugin dataref '{DataRef}' is available (after {Attempts} attempt(s))",
+                        _logger.LogInformation("Plugin dataRef '{DataRefPath}' is available (after {Attempts} attempt(s))",
                             _readinessProbeDataRef, attempt);
                         return;
                     }
@@ -173,12 +181,12 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
             if (_readinessProbeMaxRetries > 0 && attempt >= _readinessProbeMaxRetries)
             {
-                _logger.LogWarning("Plugin dataref '{DataRef}' not available after {Max} retries, continuing anyway",
+                _logger.LogWarning("Plugin dataRef '{DataRefPath}' not available after {Max} retries, continuing anyway",
                     _readinessProbeDataRef, _readinessProbeMaxRetries);
                 return;
             }
 
-            _logger.LogDebug("Plugin dataref '{DataRef}' not yet available (attempt {Attempt}{MaxInfo}), retrying in {Interval}s ...",
+            _logger.LogDebug("Plugin dataRef '{DataRefPath}' not yet available (attempt {Attempt}{MaxInfo}), retrying in {Interval}s ...",
                 _readinessProbeDataRef, attempt,
                 _readinessProbeMaxRetries > 0 ? $"/{_readinessProbeMaxRetries}" : "",
                 interval.TotalSeconds);
@@ -208,6 +216,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     {
         _cts = new CancellationTokenSource();
         _receiveTask = ConnectWebSocketAndReceiveAsync(_cts.Token);
+        _callbackTask = StartCallbacksAsync(_cts.Token);
         _logger.LogInformation("XPlaneWebConnector started (REST: {RestUrl}, WS: {WsUrl})", _baseUrl, _wsUrl);
     }
 
@@ -244,27 +253,43 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     }
 
     // ========================================================================
-    // IXPlaneWebConnector: Subscribe to dataref updates (WebSocket)
+    // IXPlaneWebConnector: Subscribe to dataRef updates (WebSocket)
     // ========================================================================
 
-    public async Task SubscribeAsync(SimDataRef dataref, Action<SimDataRef, float>? onchange = null)
+    public async Task SubscribeAsync(SimDataRef dataRef, Action<SimDataRef>? onchange = null)
     {
-        var (basePath, index) = ParseDataRefPath(dataref.DataRef);
+        var (basePath, index) = ParseDataRefPath(dataRef.DataRefPath);
         var id = await ResolveDataRefIdAsync(basePath);
+        var cb = onchange ?? ((_) => { });
 
-        _subscriptions[(id, index)] = (dataref, onchange ?? ((_, _) => { }));
-        await SendDataRefSubscribeAsync(id, index);
-        _logger.LogDebug("Subscribed to dataref {Name} (id={Id}, index={Index})", dataref.DataRef, id, index);
+        bool added = false;
+        _subscriptions.AddOrUpdate(
+            (id, index),
+            _ => { added = true; return (dataref: dataRef, ImmutableArray.Create(cb)); },
+            (_, existing) => (existing.Element, existing.Callbacks.Add(cb)));
+
+        if (added)
+            await SendDataRefSubscribeAsync(id, index);
+
+        _logger.LogDebug("Subscribed to dataRef {Name} (id={Id}, index={Index})", dataRef.DataRefPath, id, index);
     }
 
-    public async Task SubscribeAsync(SimStringDataRef dataref, Action<SimStringDataRef, string>? onchange = null)
+    public async Task SubscribeAsync(SimStringDataRef dataRef, Action<SimStringDataRef>? onchange = null)
     {
-        var (basePath, index) = ParseDataRefPath(dataref.DataRef);
+        var (basePath, index) = ParseDataRefPath(dataRef.DataRefPath);
         var id = await ResolveDataRefIdAsync(basePath);
+        var cb = onchange ?? ((_) => { });
 
-        _stringSubscriptions[(id, index)] = (dataref, onchange ?? ((_, _) => { }));
-        await SendDataRefSubscribeAsync(id, index);
-        _logger.LogDebug("Subscribed to string dataref {Name} (id={Id}, index={Index})", dataref.DataRef, id, index);
+        bool added = false;
+        _stringSubscriptions.AddOrUpdate(
+            (id, index),
+            _ => { added = true; return (dataref: dataRef, ImmutableArray.Create(cb)); },
+            (_, existing) => (existing.Element, existing.Callbacks.Add(cb)));
+
+        if (added)
+            await SendDataRefSubscribeAsync(id, index);
+
+        _logger.LogDebug("Subscribed to string dataRef {Name} (id={Id}, index={Index})", dataRef.DataRefPath, id, index);
     }
 
     /// <summary>Shared helper: tracks array index and delegates to <see cref="SubscribeDataRefsAsync"/>.</summary>
@@ -280,22 +305,22 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     }
 
     // ========================================================================
-    // IXPlaneWebConnector: Set dataref value (WebSocket or HTTP PATCH)
+    // IXPlaneWebConnector: Set dataRef value (WebSocket or HTTP PATCH)
     // ========================================================================
 
-    public async Task SetDataRefValueAsync(SimDataRef dataref, float value)
+    public async Task SetDataRefValueAsync(SimDataRef dataRef, float value)
     {
-        await SetDataRefValueAsync(dataref.DataRef, value);
+        await SetDataRefValueAsync(dataRef.DataRefPath, value);
     }
 
-    public async Task SetDataRefValueAsync(SimStringDataRef dataref, string value)
+    public async Task SetDataRefValueAsync(SimStringDataRef dataRef, string value)
     {
-        await SetDataRefValueAsync(dataref.DataRef, value);
+        await SetDataRefValueAsync(dataRef.DataRefPath, value);
     }
 
-    public async Task SetDataRefValueAsync(string dataref, float value)
+    public async Task SetDataRefValueAsync(string dataRefPath, float value)
     {
-        var (basePath, index) = ParseDataRefPath(dataref);
+        var (basePath, index) = ParseDataRefPath(dataRefPath);
         var id = await ResolveDataRefIdAsync(basePath);
         using var doc = JsonDocument.Parse(value.ToString(System.Globalization.CultureInfo.InvariantCulture));
         var jsonValue = doc.RootElement.Clone();
@@ -312,12 +337,12 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 await SetDataRefValuesByWsAsync([new DataRefSetEntry { Id = id, Value = jsonValue, Index = idx }]);
                 break;
         }
-        _logger.LogInformation("SetDataRefValueAsync Dataref: {dataRef}, Value:{value}", dataref, value);
+        _logger.LogDebug("SetDataRefValueAsync Dataref: {dataRef}, Value:{value}", dataRefPath, value);
     }
 
-    public async Task SetDataRefValueAsync(string dataref, string value)
+    public async Task SetDataRefValueAsync(string dataRefPath, string value)
     {
-        var (basePath, index) = ParseDataRefPath(dataref);
+        var (basePath, index) = ParseDataRefPath(dataRefPath);
         var id = await ResolveDataRefIdAsync(basePath);
         var base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
         using var doc = JsonDocument.Parse($"\"{base64}\"");
@@ -335,7 +360,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 await SetDataRefValuesByWsAsync([new DataRefSetEntry { Id = id, Value = jsonValue, Index = idx }]);
                 break;
         }
-        _logger.LogInformation("SetDataRefValueAsync Dataref: {dataRef}, Value:{value}", dataref, value);
+        _logger.LogDebug("SetDataRefValueAsync Dataref: {dataRef}, Value:{value}", dataRefPath, value);
     }
 
 
@@ -369,7 +394,23 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             command.Command, id, _transport, duration);
     }
 
-    
+    private async Task StartCallbacksAsync(CancellationToken ct)
+    {
+        try
+        {
+            Task processingTask = Task.Run(() => ProcessCallbackChannelAsync(ct), ct);
+            await processingTask;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Exception while setting up callback Task");
+        }
+        finally
+        {
+            _callbacks.Writer.TryComplete();
+        }
+
+    }
 
     // ========================================================================
     // WebSocket connection and receive loop
@@ -387,6 +428,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             {
                 try
                 {
+                    _webSocket?.Dispose();
                     _webSocket = new ClientWebSocket();
                     await _webSocket.ConnectAsync(new Uri(_wsUrl), ct);
                     _logger.LogInformation("WebSocket connected to {Url}", _wsUrl);
@@ -408,12 +450,13 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogInformation("WebSocket connection lost ({Error}), retrying once in 3s...", ex.Message);
+                    _logger.LogWarning("WebSocket connection lost ({Error}), retrying once in 3s...", ex.Message);
                     _logger.LogDebug(ex, "WebSocket connection lost details");
                     try { await Task.Delay(3000, ct); } catch (OperationCanceledException) { break; }
 
                     try
                     {
+                        _webSocket?.Dispose();
                         _webSocket = new ClientWebSocket();
                         await _webSocket.ConnectAsync(new Uri(_wsUrl), ct);
                         _logger.LogInformation("WebSocket reconnected to {Url}", _wsUrl);
@@ -425,7 +468,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                     }
                     catch (Exception retryEx)
                     {
-                        _logger.LogInformation("WebSocket reconnect failed ({Error}), signalling connection closed", retryEx.Message);
+                        _logger.LogWarning("WebSocket reconnect failed ({Error}), signalling connection closed", retryEx.Message);
                         _logger.LogDebug(retryEx, "WebSocket reconnect failure details");
                         ConnectionClosed?.Invoke();
                         break;
@@ -449,7 +492,8 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     private async Task ReceiveLoopAsync(CancellationToken ct)
     {
         var buffer = new byte[8192];
-
+        int counter = 0;
+        long timeStamp;
         while (_webSocket?.State == WebSocketState.Open && !ct.IsCancellationRequested)
         {
             var result = await _webSocket.ReceiveAsync(buffer, ct);
@@ -472,10 +516,25 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             else
             {
                 // Slow path: multi-frame message — assemble with ArrayPool
+                _logger.LogInformation("Multiframe Message from XPlane - take slow path");
                 messageBytes = await AssembleMultiFrameMessageAsync(buffer, result.Count, ct);
             }
 
-            _incomingMessages.Writer.TryWrite(messageBytes);
+            bool statistic = false;
+            // if (counter++ == 1024) timeStamp = Stopwatch.GetTimestamp(),  0 otherwise
+            if ((counter++ & 128) == 0)
+                timeStamp = 0;
+            else
+            {
+                timeStamp = Stopwatch.GetTimestamp();
+                counter = 0;
+                statistic = true;
+            }
+
+            ChannelMessage.DataMessage dataMessage = new(timeStamp, messageBytes);
+            _incomingMessages.Writer.TryWrite(dataMessage);
+            if (statistic)
+                _logger.LogInformation("Number of Messages in Incoming-Queue: {n}", _incomingMessages.Reader.Count);
         }
     }
 
@@ -525,6 +584,34 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         }
     }
 
+    private async Task ProcessCallbackChannelAsync(CancellationToken ct)
+    {
+        try
+        {
+            await foreach (CallbackItem callbackItem in _callbacks.Reader.ReadAllAsync(ct))
+            {
+                try
+                {
+                    // based on callbackItem record type (simulated discriminated union) do appropriate call back
+                    switch (callbackItem)
+                    {
+                        case CallbackItem.SimDataRefCb cb:
+                             cb.Callback(cb.Element);
+                            break;
+                        case CallbackItem.SimStringDataRefCb cb: 
+                            cb.Callback(cb.Element); 
+                            break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error processing Callback Channel ");
+                }
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+    }
+
     /// <summary>
     /// Background task that drains the incoming message queue and dispatches
     /// callbacks.  Runs on its own thread so slow serial-port writes do not
@@ -532,13 +619,26 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     /// </summary>
     private async Task ProcessIncomingMessagesAsync(CancellationToken ct)
     {
+        PriorityChannelReader<ChannelMessage> priorityChannelReader = new(_subscriptionMessages, _incomingMessages);
         try
         {
-            await foreach (var messageBytes in _incomingMessages.Reader.ReadAllAsync(ct))
+            //await foreach (ChannelMessage channelMessage in _incomingMessages.Reader.ReadAllAsync(ct))
+            await foreach (ChannelMessage channelMessage in priorityChannelReader.ReadAllAsync(ct))
             {
                 try
                 {
-                    ProcessIncomingMessage(messageBytes);
+                    switch (channelMessage)
+                    {
+                        case ChannelMessage.DataMessage dataMessage:
+                            ProcessIncomingMessage(dataMessage);
+                            break;
+                        case ChannelMessage.SubscribeCommandMessage subscribeCommandMessage:
+                            break;
+                        case ChannelMessage.SubscribeNumericMessage subscribeNumericMessage:
+                            break;
+                        case ChannelMessage.SubscribeStringMessage subscribeStringMessage:
+                            break;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -553,8 +653,9 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     // Incoming WebSocket message processing
     // ========================================================================
 
-    private void ProcessIncomingMessage(byte[] messageBytes)
+    private void ProcessIncomingMessage(ChannelMessage.DataMessage dataMessage)
     {
+        byte[] messageBytes = dataMessage.Data;
         using var doc = JsonDocument.Parse(messageBytes);
         
         var root = doc.RootElement;
@@ -565,7 +666,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         switch (typeProp.GetString())
         {
             case "dataref_update_values":
-                HandleDataRefUpdates(root);
+                HandleDataRefUpdates(root, dataMessage.TimeStamp);
                 break;
 
             case "command_update_is_active":
@@ -573,24 +674,24 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 break;
 
             case "result":
-                var result = JsonSerializer.Deserialize(messageBytes, XPlaneJsonContext.Default.WsResultMessage);
+                WsResultMessage? result = JsonSerializer.Deserialize(messageBytes, XPlaneJsonContext.Default.WsResultMessage);
                 if (result is not null && !result.Success)
                     _logger.LogWarning("WebSocket request {ReqId} failed: [{Code}] {Message}",
                         result.ReqId, result.ErrorCode, result.ErrorMessage);
                 break;
 
             default:
-                _logger.LogInformation("Unhandled WebSocket message type: {Type}", typeProp.GetString());
+                _logger.LogWarning("Unhandled WebSocket message type: {Type}", typeProp.GetString());
                 break;
         }
     }
 
     /// <summary>
     /// Dispatches dataref_update_values to registered callbacks.
-    /// The "data" object has dynamic keys (dataref session IDs as strings)
+    /// The "data" object has dynamic keys (dataRef session IDs as strings)
     /// with values that are either scalars or arrays — parsed with JsonDocument.
     /// </summary>
-    private void HandleDataRefUpdates(JsonElement root)
+    private void HandleDataRefUpdates(JsonElement root, long timeStamp)
     {
         if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
             return;
@@ -603,47 +704,57 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             switch (prop.Value.ValueKind)
             {
                 case JsonValueKind.Number:
-                    DispatchScalarUpdate(id, (float)prop.Value.GetDouble());
+                    DispatchScalarUpdate(id, (float)prop.Value.GetDouble(), timeStamp);
                     break;
 
                 case JsonValueKind.Array:
-                    DispatchArrayUpdate(id, prop.Value);
+                    DispatchArrayUpdate(id, prop.Value, timeStamp);
                     break;
 
                 case JsonValueKind.String:
-                    DispatchStringUpdate(id, prop.Value.GetString() ?? "");
+                    DispatchStringUpdate(id, prop.Value.GetString() ?? "", timeStamp);
                     break;
             }
         }
     }
 
-    private void DispatchScalarUpdate(long id, float value)
+    private void DispatchScalarUpdate(long id, float value, long timeStamp)
     {
         if (_subscriptions.TryGetValue((id, -1), out var sub))
         {
             if (_reverseDataRefIdCache.TryGetValue(id, out string name))            {
-                _logger.LogDebug("Received scalar update for dataref {Name} (id={Id}): {Value}", name, id, value);
+                _logger.LogDebug("Received scalar update for dataRef {Name} (id={Id}): {Value}", name, id, value);
             }
             sub.Element.Value = value;
-            try { sub.Callback(sub.Element, value); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Error in dataref callback for id {Id}", id); }
+            sub.Element.TimeSTamp = timeStamp;
+            foreach (Action<SimDataRef> cb in sub.Callbacks)
+            {
+                // try { cb(sub.Element); }
+                // catch (Exception ex) { _logger.LogWarning(ex, "Error in dataRef callback for id {Id}", id); }
+                _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, sub.Element));
+            }
         }
     }
 
-    private void DispatchArrayUpdate(long id, JsonElement arrayElement)
+    private void DispatchArrayUpdate(long id, JsonElement arrayElement, long timeStamp)
     {
         // Check for string subscriptions first (data-type datarefs sent as arrays)
         if (_stringSubscriptions.TryGetValue((id, -1), out var strSub))
         {
-            var decoded = DecodeByteArrayToString(arrayElement);
+            string decoded = DecodeByteArrayToString(arrayElement);
             strSub.Element.Value = decoded;
+            strSub.Element.TimeSTamp = timeStamp;
             if (_reverseDataRefIdCache.TryGetValue(id, out string name))
             {
-                _logger.LogDebug("Received array update(string) for dataref {Name} (id={Id}): {Value}", name, id, decoded);
+                _logger.LogDebug("Received array update(string) for dataRef {Name} (id={Id}): {Value}", name, id, decoded);
             }
 
-            try { strSub.Callback(strSub.Element, decoded); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Error in string dataref callback for id {Id}", id); }
+            foreach (var cb in strSub.Callbacks)
+            {
+                //try { cb(strSub.Element); }
+                //catch (Exception ex) { _logger.LogWarning(ex, "Error in string dataRef callback for id {Id}", id); }
+                _callbacks.Writer.TryWrite(new CallbackItem.SimStringDataRefCb(cb, strSub.Element));
+            }
             return;
         }
 
@@ -664,12 +775,17 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 {
                     if (_reverseDataRefIdCache.TryGetValue(id, out string name))
                     {
-                        if (name != "AirbusFBW/BatVolts")
-                            _logger.LogDebug("Received array update(indexed) for dataref {Name} (id={Id}), Index {idx} : {Value}", name, id, idx, val );
+                        // if (name != "AirbusFBW/BatVolts")
+                            _logger.LogDebug("Received array update(indexed) for dataRef {Name} (id={Id}), Index {idx} : {Value}", name, id, idx, val );
                     }
                     sub.Element.Value = val;
-                    try { sub.Callback(sub.Element, val); }
-                    catch (Exception ex) { _logger.LogWarning(ex, "Error in dataref callback for id {Id}[{Index}]", id, idx); }
+                    sub.Element.TimeSTamp = timeStamp;
+                    foreach (var cb in sub.Callbacks)
+                    {
+                        //try { cb(sub.Element); }
+                        //catch (Exception ex) { _logger.LogWarning(ex, "Error in dataRef callback for id {Id}[{Index}]", id, idx); }
+                        _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, sub.Element));
+                    }
                 }
                 pos++;
             }
@@ -684,19 +800,24 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 {
                     var val = (float)element.GetDouble();
                     sub.Element.Value = val;
+                    sub.Element.TimeSTamp = timeStamp;
                     if (_reverseDataRefIdCache.TryGetValue(id, out string name))
                     {
-                        _logger.LogDebug("Received array update(full) for dataref {Name} (id={Id})  : {Value}", name, id, val);
+                        _logger.LogDebug("Received array update(full) for dataRef {Name} (id={Id})  : {Value}", name, id, val);
                     }
-                    try { sub.Callback(sub.Element, val); }
-                    catch (Exception ex) { _logger.LogWarning(ex, "Error in dataref callback for id {Id}[{Index}]", id, pos); }
+                    foreach (var cb in sub.Callbacks)
+                    {
+                        //try { cb(sub.Element); }
+                        //catch (Exception ex) { _logger.LogWarning(ex, "Error in dataRef callback for id {Id}[{Index}]", id, pos); }
+                        _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, sub.Element));
+                    }
                 }
                 pos++;
             }
         }
     }
 
-    private void DispatchStringUpdate(long id, string base64)
+    private void DispatchStringUpdate(long id, string base64, long timeStamp)
     {
         string decoded;
         try { decoded = Encoding.UTF8.GetString(Convert.FromBase64String(base64)); }
@@ -706,11 +827,16 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         {
             if (_reverseDataRefIdCache.TryGetValue(id, out string name))
             {
-                _logger.LogDebug("Received string for dataref {Name} (id={Id}): {Value}", name, id, decoded);
+                _logger.LogDebug("Received string for dataRef {Name} (id={Id}): {Value}", name, id, decoded);
             }
             sub.Element.Value = decoded;
-            try { sub.Callback(sub.Element, decoded); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Error in string dataref callback for id {Id}", id); }
+            sub.Element.TimeSTamp = timeStamp;
+            foreach (var cb in sub.Callbacks)
+            {
+                //try { cb(sub.Element); }
+                //catch (Exception ex) { _logger.LogWarning(ex, "Error in string dataRef callback for id {Id}", id); }
+                _callbacks.Writer.TryWrite(new CallbackItem.SimStringDataRefCb(cb, sub.Element));
+            }
         }
     }
 
@@ -741,7 +867,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             if (!long.TryParse(prop.Name, out var id))
                 continue;
 
-            if (!_commandSubscriptions.TryGetValue(id, out var callback))
+            if (!_commandSubscriptions.TryGetValue(id, out var callbacks))
                 continue;
 
             var isActive = prop.Value.ValueKind == JsonValueKind.True;
@@ -749,8 +875,12 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             {
                 _logger.LogDebug("Received HandleCommand for Commandpath {Name} (id={Id}):  active={active}", path , id, isActive);
             }
-            try { callback(id, isActive); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Error in command callback for id {Id}", id); }
+            foreach (var cb in callbacks)
+            {
+                //try { cb(id, isActive); }
+                //catch (Exception ex) { _logger.LogWarning(ex, "Error in command callback for id {Id}", id); }
+                _callbacks.Writer.TryWrite(new CallbackItem.CommandCb(cb, id, isActive ));
+            }
         }
     }
 
@@ -774,7 +904,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     }
 
     // ========================================================================
-    // REST: Resolve dataref/command names to session IDs
+    // REST: Resolve dataRef/command names to session IDs
     // ========================================================================
 
     private async Task<long> ResolveDataRefIdAsync(string dataRefPath)
@@ -787,7 +917,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync();
-        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo);
+        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo);
 
         if (result?.Data is not { Count: > 0 })
             throw new KeyNotFoundException($"Dataref '{dataRefPath}' not found in X-Plane");
@@ -795,7 +925,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         var id = result.Data[0].Id;
         _dataRefIdCache[dataRefPath] = id;
         _reverseDataRefIdCache[id] = dataRefPath;
-        _logger.LogDebug("Resolved dataref {Name} ? id {Id}", dataRefPath, id);
+        _logger.LogDebug("Resolved dataRef {Name} ? id {Id}", dataRefPath, id);
         return id;
     }
 
@@ -809,7 +939,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync();
-        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneListResponseXPlaneCommandInfo);
+        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneCommandInfo);
 
         if (result?.Data is not { Count: > 0 })
             throw new KeyNotFoundException($"Command '{commandPath}' not found in X-Plane");
@@ -830,7 +960,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         using var response = await _httpClientFactory.CreateClient().GetAsync(_capabilitiesUrl, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        return await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneCapabilitiesResponse, ct);
+        return await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneCapabilitiesResponse, ct);
     }
 
     // ========================================================================
@@ -848,7 +978,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo, ct);
+        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo, ct);
         return result?.Data ?? [];
     }
 
@@ -857,7 +987,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/datarefs/count", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
+        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
         return result?.Data ?? 0;
     }
 
@@ -867,14 +997,14 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/datarefs/{id}/value{indexParam}", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneValueResponse, ct);
+        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneValueResponse, ct);
         return result?.Data ?? default;
     }
 
     public async Task SetDataRefValueByIdAsync(long id, JsonElement value, int? index = null, CancellationToken ct = default)
     {
         var body = new DataRefValueBody { Data = value };
-        var json = JsonSerializer.SerializeToUtf8Bytes(body, XPlaneJsonContext.Default.DataRefValueBody);
+        var json = JsonSerializer.SerializeToUtf8Bytes(body, Models.XPlaneJsonContext.Default.DataRefValueBody);
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
         var indexParam = index.HasValue ? $"?index={index.Value}" : "";
@@ -891,7 +1021,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to set dataref value via HTTP for id {Id}{Index}", id, index.HasValue ? $"[index={index.Value}]" : "");
+                    _logger.LogWarning(ex, "Failed to set dataRef value via HTTP for id {Id}{Index}", id, index.HasValue ? $"[index={index.Value}]" : "");
                 }
             }
         }
@@ -914,7 +1044,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             Type = "dataref_set_values",
             Params = new DataRefSetValuesParams { Datarefs = [.. datarefs] }
         };
-        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestDataRefSetValuesParams);
+        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefSetValuesParams);
     }
 
     // ========================================================================
@@ -929,7 +1059,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             Type = "dataref_subscribe_values",
             Params = new DataRefSubscribeParams { Datarefs = [.. datarefs] }
         };
-        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
+        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
     }
 
     public async Task UnsubscribeDataRefsAsync(IEnumerable<DataRefSubscribeEntry> datarefs)
@@ -940,7 +1070,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             Type = "dataref_unsubscribe_values",
             Params = new DataRefSubscribeParams { Datarefs = [.. datarefs] }
         };
-        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
+        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
     }
 
     public async Task UnsubscribeAllDataRefsAsync()
@@ -951,7 +1081,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             Type = "dataref_unsubscribe_values",
             Params = new DataRefUnsubscribeAllParams()
         };
-        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestDataRefUnsubscribeAllParams);
+        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefUnsubscribeAllParams);
         _subscriptions.Clear();
         _stringSubscriptions.Clear();
         _subscribedIndices.Clear();
@@ -972,7 +1102,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneListResponseXPlaneCommandInfo, ct);
+        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneCommandInfo, ct);
         return result?.Data ?? [];
     }
 
@@ -981,14 +1111,14 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/commands/count", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
+        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
         return result?.Data ?? 0;
     }
 
     public async Task ActivateCommandAsync(long id, float duration = 0, CancellationToken ct = default)
     {
         var body = new CommandActivateBody { Duration = duration };
-        var json = JsonSerializer.SerializeToUtf8Bytes(body, XPlaneJsonContext.Default.CommandActivateBody);
+        var json = JsonSerializer.SerializeToUtf8Bytes(body, Models.XPlaneJsonContext.Default.CommandActivateBody);
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
         if (_fireForgetOnHttpTransport)
@@ -1023,7 +1153,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     public async Task StartFlightAsync(JsonElement flightData, CancellationToken ct = default)
     {
         var body = new FlightBody { Data = flightData };
-        var json = JsonSerializer.SerializeToUtf8Bytes(body, XPlaneJsonContext.Default.FlightBody);
+        var json = JsonSerializer.SerializeToUtf8Bytes(body, Models.XPlaneJsonContext.Default.FlightBody);
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
 
@@ -1054,7 +1184,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     public async Task UpdateFlightAsync(JsonElement flightData, CancellationToken ct = default)
     {
         var body = new FlightBody { Data = flightData };
-        var json = JsonSerializer.SerializeToUtf8Bytes(body, XPlaneJsonContext.Default.FlightBody);
+        var json = JsonSerializer.SerializeToUtf8Bytes(body, Models.XPlaneJsonContext.Default.FlightBody);
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
 
@@ -1091,7 +1221,10 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         var entries = new List<CommandIdEntry>();
         foreach (var id in commandIds)
         {
-            _commandSubscriptions[id] = onUpdate;
+            _commandSubscriptions.AddOrUpdate(
+                id,
+                _ => ImmutableArray.Create(onUpdate),
+                (_, existing) => existing.Add(onUpdate));
             entries.Add(new CommandIdEntry { Id = id });
         }
 
@@ -1149,7 +1282,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
                 Commands = [new CommandSetEntry { Id = id, IsActive = isActive, Duration = duration }]
             }
         };
-        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandSetActiveParams);
+        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestCommandSetActiveParams);
     }
 
     // ========================================================================
