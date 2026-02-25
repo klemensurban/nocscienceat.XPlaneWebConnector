@@ -48,15 +48,16 @@ It writes to two channels but never reads from any — consumption happens in ot
 
 ```
 XPlaneWebConnector(host, port, ...)
+  └─ validates apiVersion against SupportedApiVersions
   └─ initializes: _logger, _httpClientFactory, _baseUrl, _wsUrl, _capabilitiesUrl
   └─ initializes channels: _dataChannel, _commandChannel, _callbacks
   └─ initializes caches:   _dataRefIdCache, _reverseDataRefIdCache, _commandIdCache, _reverseCommandIdCache
-  └─ initializes subs:     _subscriptions, _stringSubscriptions, _subscribedIndices, _commandSubscriptions
+  └─ initializes subs:     _subscriptions, _stringSubscriptions, _subscribedIndices, _subscriptionRegistry, _commandSubscriptions
 ```
 
 ---
 
-## Availability Check (IXPlaneAvailabilityCheck)
+## Availability Check (IXPlaneWebConnector)
 
 ```
 IsAvailableAsync()                           ── HTTP GET /api/capabilities
@@ -87,17 +88,23 @@ StopAsync()
 
 ## Public Subscribe API (IXPlaneWebConnector)
 
-```
-SubscribeAsync(SimDataRef, callback)
-  ├─ ParseDataRefPath()                      ──► Utility.cs
-  ├─ ResolveDataRefIdAsync()                 ── HTTP GET /datarefs  (this file)
-  └─ _commandChannel.Writer.SendCommandAsync ──► Worker thread picks up via HandleWorkerCommandAsync
-                                                 ──► Worker.cs
+Returns `IDisposable` (`SubscriptionHandle`) for per-consumer unsubscription.
 
-SubscribeAsync(SimStringDataRef, callback)
+```
+SubscribeAsync(SimDataRef, callback) → IDisposable
   ├─ ParseDataRefPath()                      ──► Utility.cs
   ├─ ResolveDataRefIdAsync()                 ── HTTP GET /datarefs  (this file)
-  └─ _commandChannel.Writer.SendCommandAsync ──► Worker.cs
+  ├─ Guid.NewGuid()                          ── generates subscription ID
+  ├─ _commandChannel.Writer.SendCommandAsync ──► Worker thread picks up via HandleWorkerCommandAsync
+  │                                                ──► Worker.cs
+  └─ return new SubscriptionHandle(guid)      ── caller disposes to unsubscribe
+
+SubscribeAsync(SimStringDataRef, callback) → IDisposable
+  ├─ ParseDataRefPath()                      ──► Utility.cs
+  ├─ ResolveDataRefIdAsync()                 ── HTTP GET /datarefs  (this file)
+  ├─ Guid.NewGuid()                          ── generates subscription ID
+  ├─ _commandChannel.Writer.SendCommandAsync ──► Worker.cs
+  └─ return new SubscriptionHandle(guid)
 ```
 
 ---
@@ -149,9 +156,6 @@ UpdateFlightAsync()                          ── HTTP PATCH /flight
 SetDataRefValuesByWsAsync()
   └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
 
-UnsubscribeDataRefsAsync()
-  └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
-
 SubscribeCommandUpdatesAsync()
   └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
 
@@ -161,6 +165,8 @@ UnsubscribeCommandUpdatesAsync()
 SetCommandActiveAsync()
   └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
 ```
+
+Note: `UnsubscribeDataRefsAsync` is now in Worker.cs (called internally by `HandleUnsubscribeByGuidAsync`).
 
 ---
 

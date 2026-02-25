@@ -19,14 +19,34 @@ public interface IXPlaneWebConnector : IDisposable
     Task StopAsync(int timeout = 5000);
 
     // ========================================================================
+    // Availability check
+    // ========================================================================
+
+    /// <summary>Returns true if the X-Plane REST API is reachable.</summary>
+    Task<bool> IsAvailableAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Blocks until the X-Plane API is reachable and (optionally) a readiness-probe
+    /// dataref is registered. Useful to wait for aircraft plugins to finish loading.
+    /// </summary>
+    Task WaitUntilAvailableAsync(TimeSpan? pollInterval = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Raised when the WebSocket connection to X-Plane is closed cleanly
+    /// (e.g. X-Plane exited). Subscribers can use this to trigger a graceful
+    /// application shutdown.
+    /// </summary>
+    event Action? ConnectionClosed;
+
+    // ========================================================================
     // DataRefPath subscriptions
     // ========================================================================
 
-    /// <summary>Subscribes to a numeric dataRef.</summary>
-    Task SubscribeAsync(SimDataRef dataRef, Action<SimDataRef>? onchange = null);
+    /// <summary>Subscribes to a numeric dataRef. Dispose the returned handle to unsubscribe.</summary>
+    Task<IDisposable> SubscribeAsync(SimDataRef dataRef, Action<SimDataRef>? onchange = null);
 
-    /// <summary>Subscribes to a string/data-type dataRef. Values are base64-decoded from X-Plane.</summary>
-    Task SubscribeAsync(SimStringDataRef dataRef, Action<SimStringDataRef>? onchange = null);
+    /// <summary>Subscribes to a string/data-type dataRef. Dispose the returned handle to unsubscribe.</summary>
+    Task<IDisposable> SubscribeAsync(SimStringDataRef dataRef, Action<SimStringDataRef>? onchange = null);
 
     // ========================================================================
     // DataRefPath writes

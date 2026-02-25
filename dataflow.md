@@ -25,14 +25,12 @@ This document provides a detailed description of the internal data flows, thread
 
 ## 1. Library Overview
 
-`nocscienceat.XPlaneWebConnector` is a .NET 10 library that communicates with X-Plane 12.1.1+ via its built-in REST (`/api/v3`) and WebSocket (`ws://host:port/api/v3`) APIs. It wraps the low-level HTTP and WebSocket protocol handling into a clean, async interface for .NET applications.
+`nocscienceat.XPlaneWebConnector` is a .NET 10 library that communicates with X-Plane 12.1.1+ via its built-in REST and WebSocket APIs. The API version path segment (`v1`, `v2`, `v3`) is configurable at construction time to match your X-Plane version.
 
 The library provides two abstraction levels:
 
-- **High-level** (`IXPlaneWebConnector`): Subscribe to datarefs with callbacks, set values by path, send commands by name. The library handles name→ID resolution, WebSocket framing, and JSON serialization transparently.
+- **High-level** (`IXPlaneWebConnector`): Subscribe to datarefs with callbacks (returns `IDisposable` for per-consumer unsubscription), set values by path, send commands by name, wait for X-Plane availability, detect connection loss. The library handles name→ID resolution, WebSocket framing, and JSON serialization transparently.
 - **Low-level** (`IXPlaneApi`): Direct access to the X-Plane REST endpoints and raw WebSocket operations using session IDs.
-
-A third interface (`IXPlaneAvailabilityCheck`) handles startup sequencing — waiting for X-Plane to be reachable and for plugin datarefs to be registered.
 
 ### System Context
 
@@ -50,8 +48,6 @@ A third interface (`IXPlaneAvailabilityCheck`) handles startup sequencing — wa
 │                ┌────────────┴────────────┐                          │
 │                │   IXPlaneWebConnector   │ High-level API           │
 │                │   IXPlaneApi            │ Low-level API            │
-│                │   IXPlaneAvailability   │ Startup sequencing       │
-│                │        Check            │                          │
 │                └─────────────────────────┘                          │
 └─────────────────────────────────────────────────────────────────────┘
                               │
@@ -62,8 +58,9 @@ A third interface (`IXPlaneAvailabilityCheck`) handles startup sequencing — wa
 ┌─────────────────────────────────────────────────────────────────────┐
 │                      X-Plane 12.1.1+                                │
 │                                                                     │
-│  /api/v3/datarefs    /api/v3/commands    ws://host:port/api/v3      │
-│  /api/v3/flight      /api/capabilities                              │
+│  /api/{version}/datarefs  /api/{version}/commands                   │
+│  /api/{version}/flight    /api/capabilities                         │
+│  ws://host:port/api/{version}                                       │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -71,7 +68,7 @@ A third interface (`IXPlaneAvailabilityCheck`) handles startup sequencing — wa
 
 ## 2. Interface Layering
 
-The three interfaces are implemented by a single class (`XPlaneWebConnector`) but serve different roles:
+The two interfaces are implemented by a single class (`XPlaneWebConnector`) but serve different roles:
 
 ```
                     ┌───────────────────────────────┐
@@ -81,31 +78,30 @@ The three interfaces are implemented by a single class (`XPlaneWebConnector`) bu
                     │ implements:                   │
                     │  • IXPlaneWebConnector        │
                     │  • IXPlaneApi                 │
-                    │  • IXPlaneAvailabilityCheck   │
                     │  • IDisposable                │
                     └───────────────────────────────┘
 
- ┌─────────────────────────┐  ┌──────────────────────────┐  ┌──────────────────────────┐
- │  IXPlaneWebConnector    │  │   IXPlaneApi             │  │ IXPlaneAvailabilityCheck │
- │  (high-level)           │  │   (low-level)            │  │ (startup)                │
- ├─────────────────────────┤  ├──────────────────────────┤  ├──────────────────────────┤
- │ Start()                 │  │ GetCapabilitiesAsync()   │  │ IsAvailableAsync()       │
- │ StopAsync()             │  │ ListDataRefsAsync()      │  │ WaitUntilAvailableAsync()│
- │ SubscribeAsync()        │  │ GetDataRefCountAsync()   │  │ ConnectionClosed event   │
- │ SetDataRefValueAsync()  │  │ GetDataRefValueAsync()   │  └──────────────────────────┘
- │ SendCommandAsync()      │  │ SetDataRefValueByIdAs()  │
- │ SendCommandAsync(,dur)  │  │ SetDataRefValuesByWs()   │
- │ Dispose()               │  │ ListCommandsAsync()      │
- └─────────────────────────┘  │ GetCommandCountAsync()   │
-                              │ ActivateCommandAsync()   │
-                              │ StartFlightAsync()       │
-                              │ UpdateFlightAsync()      │
-                              │ SubscribeDataRefsAsync() │
-                              │ UnsubscribeDataRefsAs()  │
-                              │ UnsubscribeAllDataRefs() │
-                              │ Subscribe/Unsub CmdUpd() │
-                              │ SetCommandActiveAsync()  │
-                              └──────────────────────────┘
+ ┌─────────────────────────┐  ┌──────────────────────────┐
+ │  IXPlaneWebConnector    │  │   IXPlaneApi             │
+ │  (high-level)           │  │   (low-level)            │
+ ├─────────────────────────┤  ├──────────────────────────┤
+ │ Start()                 │  │ GetCapabilitiesAsync()   │
+ │ StopAsync()             │  │ ListDataRefsAsync()      │
+ │ IsAvailableAsync()      │  │ GetDataRefCountAsync()   │
+ │ WaitUntilAvailableAs()  │  │ GetDataRefValueAsync()   │
+ │ ConnectionClosed event  │  │ SetDataRefValueByIdAs()  │
+ │ SubscribeAsync()        │  │ SetDataRefValuesByWs()   │
+ │  → returns IDisposable  │  │ ListCommandsAsync()      │
+ │ SetDataRefValueAsync()  │  │ GetCommandCountAsync()   │
+ │ SendCommandAsync()      │  │ ActivateCommandAsync()   │
+ │ SendCommandAsync(,dur)  │  │ StartFlightAsync()       │
+ │ Dispose()               │  │ UpdateFlightAsync()      │
+ └─────────────────────────┘  │ SubscribeDataRefsAsync() │
+                               │ UnsubscribeDataRefsAs()  │
+                               │ UnsubscribeAllDataRefs() │
+                               │ Subscribe/Unsub CmdUpd() │
+                               │ SetCommandActiveAsync()  │
+                               └──────────────────────────┘
 ```
 
 ### When to use which interface
@@ -113,13 +109,14 @@ The three interfaces are implemented by a single class (`XPlaneWebConnector`) bu
 | Use case | Interface | Example |
 |---|---|---|
 | Subscribe to a dataref with a callback | `IXPlaneWebConnector` | Panel LED updates |
+| Unsubscribe a single consumer | Dispose the `IDisposable` handle | Panel shutdown |
 | Set a switch position by dataref path | `IXPlaneWebConnector` | Toggle landing lights |
 | Send a one-shot command by name | `IXPlaneWebConnector` | APU master on |
 | Query all registered datarefs | `IXPlaneApi` | Tooling / debugging |
 | Batch-set multiple datarefs in one WS frame | `IXPlaneApi` | High-frequency syncing |
 | Control command begin/end precisely | `IXPlaneApi` | Long-press fire test |
-| Wait for X-Plane to start up | `IXPlaneAvailabilityCheck` | Hosted service startup |
-| React to X-Plane shutdown | `IXPlaneAvailabilityCheck` | Graceful app exit |
+| Wait for X-Plane to start up | `IXPlaneWebConnector` | Hosted service startup |
+| React to X-Plane shutdown | `IXPlaneWebConnector` | Graceful app exit |
 
 ---
 
@@ -942,33 +939,44 @@ XPlaneWebConnector
 │
 ├── Subscriptions (populated by SubscribeAsync, cleared on StopAsync)
 │   ├── _subscriptions               ConcurrentDictionary<(long Id, int Index),
-│   │                                  (SimDataRef, Action<SimDataRef, float>)>
-│   │                                (42, -1) → (element, callback)   // scalar
-│   │                                (42,  7) → (element, callback)   // array index
+│   │                                  (SimDataRef, ImmutableArray<Action<SimDataRef>>)>
+│   │                                (42, -1) → (element, [cb1, cb2])  // scalar, multi-consumer
+│   │                                (42,  7) → (element, [cb1])      // array index
 │   │
 │   ├── _stringSubscriptions         ConcurrentDictionary<(long Id, int Index),
-│   │                                  (SimStringDataRef, Action<SimStringDataRef, string>)>
+│   │                                  (SimStringDataRef, ImmutableArray<Action<SimStringDataRef>>)>
 │   │
 │   ├── _subscribedIndices           ConcurrentDictionary<long, SortedSet<int>>
 │   │                                42 → { 1, 3, 7 }  // tracks which indices
 │   │                                                   // are subscribed per ID
 │   │
-│   └── _commandSubscriptions        ConcurrentDictionary<long, Action<long, bool>>
-│                                    100 → callback(id, isActive)
+│   ├── _subscriptionRegistry        ConcurrentDictionary<Guid, SubscriptionEntry>
+│   │                                Per-consumer tracking. Each SubscribeAsync call
+│   │                                generates a GUID. SubscriptionEntry contains:
+│   │                                (DataRefId, Index, Kind, Callback delegate)
+│   │                                Used by HandleUnsubscribeByGuidAsync for
+│   │                                ref-counted unsubscription.
+│   │
+│   └── _commandSubscriptions        ConcurrentDictionary<long, ImmutableArray<Action<long, bool>>>
+│                                    100 → [callback1, callback2]
 │
 ├── Message Pipeline
-│   ├── _incomingMessages            Channel<byte[]>(50, DropOldest)
+│   ├── _dataChannel                Channel<XPlaneDataMessage>(100, DropOldest)
 │   │                                Decouples WS read from callback dispatch
+│   ├── _commandChannel             Channel<CommandEnvelope<WorkerCommand, bool>>
+│   │                                Subscription commands routed to worker thread
+│   ├── _callbacks                  Channel<CallbackItem>
+│   │                                Dispatched callbacks from worker to callback thread
 │   └── _nextReqId                   int (Interlocked.Increment)
 │
 └── Configuration (immutable after construction)
-├── _baseUrl                     "http://host:port/api/v3"
-├── _wsUrl                       "ws://host:port/api/v3"
-├── _capabilitiesUrl             "http://host:port/api/capabilities"
-├── _transport                   CommandSetDataRefTransport (WebSocket or Http)
-├── _fireForgetOnHttpTransport   bool — when true, HTTP writes return immediately
-├── _readinessProbeDataRef       string? (optional plugin dataref to wait for)
-└── _readinessProbeMaxRetries    int (0 = unlimited)
+    ├── _baseUrl                     "http://host:port/api/{apiVersion}"
+    ├── _wsUrl                       "ws://host:port/api/{apiVersion}"
+    ├── _capabilitiesUrl             "http://host:port/api/capabilities"
+    ├── _transport                   CommandSetDataRefTransport (WebSocket or Http)
+    ├── _fireForgetOnHttpTransport   bool — when true, HTTP writes return immediately
+    ├── _readinessProbeDataRef       string? (optional plugin dataref to wait for)
+    └── _readinessProbeMaxRetries    int (0 = unlimited)
 ```
 
 ---
@@ -1045,4 +1053,4 @@ XPlaneWebConnector
 
 ---
 
-*This document reflects the library as of version 1.1.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*
+*This document reflects the library as of version 1.2.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*

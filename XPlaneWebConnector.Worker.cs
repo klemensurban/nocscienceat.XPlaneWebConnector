@@ -251,13 +251,16 @@ public sealed partial class XPlaneWebConnector
     /// Registers a numeric dataRef subscription. Returns true if this is a new subscription.
     /// Called on the Worker thread via <see cref="HandleWorkerCommandAsync"/>.
     /// </summary>
-    private bool RegisterNumericSubscription(long id, int index, SimDataRef element, Action<SimDataRef> callback)
+    private bool RegisterNumericSubscription(Guid subscriptionId, long id, int index, SimDataRef element, Action<SimDataRef> callback)
     {
         bool added = false;
         _subscriptions.AddOrUpdate(
             (id, index),
             _ => { added = true; return (element, ImmutableArray.Create(callback)); },
             (_, existing) => (existing.Element, existing.Callbacks.Add(callback)));
+
+        _subscriptionRegistry[subscriptionId] = new SubscriptionEntry(id, index, SubscriptionKind.Numeric, callback);
+
         return added;
     }
 
@@ -265,13 +268,16 @@ public sealed partial class XPlaneWebConnector
     /// Registers a string dataRef subscription. Returns true if this is a new subscription.
     /// Called on the Worker thread via <see cref="HandleWorkerCommandAsync"/>.
     /// </summary>
-    private bool RegisterStringSubscription(long id, int index, SimStringDataRef element, Action<SimStringDataRef> callback)
+    private bool RegisterStringSubscription(Guid subscriptionId, long id, int index, SimStringDataRef element, Action<SimStringDataRef> callback)
     {
         bool added = false;
         _stringSubscriptions.AddOrUpdate(
             (id, index),
             _ => { added = true; return (element, ImmutableArray.Create(callback)); },
             (_, existing) => (existing.Element, existing.Callbacks.Add(callback)));
+
+        _subscriptionRegistry[subscriptionId] = new SubscriptionEntry(id, index, SubscriptionKind.String, callback);
+
         return added;
     }
 
@@ -284,13 +290,17 @@ public sealed partial class XPlaneWebConnector
         switch (command)
         {
             case WorkerCommand.SubscribeNumeric sub:
-                if (RegisterNumericSubscription(sub.Id, sub.Index, sub.Element, sub.Callback))
+                if (RegisterNumericSubscription(sub.SubscriptionId, sub.Id, sub.Index, sub.Element, sub.Callback))
                     await SendDataRefSubscribeAsync(sub.Id, sub.Index);
                 return true;
 
             case WorkerCommand.SubscribeString sub:
-                if (RegisterStringSubscription(sub.Id, sub.Index, sub.Element, sub.Callback))
+                if (RegisterStringSubscription(sub.SubscriptionId, sub.Id, sub.Index, sub.Element, sub.Callback))
                     await SendDataRefSubscribeAsync(sub.Id, sub.Index);
+                return true;
+
+            case WorkerCommand.UnsubscribeByGuid unsub:
+                await HandleUnsubscribeByGuidAsync(unsub.SubscriptionId);
                 return true;
 
             case WorkerCommand.SubscribeCommandUpdates sub:
@@ -331,6 +341,87 @@ public sealed partial class XPlaneWebConnector
     // Called exclusively from HandleWorkerCommandAsync on the worker thread.
     // ========================================================================
 
+    /// <summary>
+    /// Removes a single consumer's callback identified by GUID.
+    /// If no consumers remain for that (id, index), unsubscribes from X-Plane
+    /// and cleans up _subscribedIndices.
+    /// </summary>
+    private async Task HandleUnsubscribeByGuidAsync(Guid subscriptionId)
+    {
+        if (!_subscriptionRegistry.TryRemove(subscriptionId, out var entry))
+        {
+            _logger.LogDebug("Unsubscribe: GUID {SubId} not found in registry (already removed?)", subscriptionId);
+            return;
+        }
+
+        var key = (entry.DataRefId, entry.Index);
+        bool lastConsumer = false;
+
+        switch (entry.Kind)
+        {
+            case SubscriptionKind.Numeric:
+                if (_subscriptions.TryGetValue(key, out var numSub))
+                {
+                    var updated = numSub.Callbacks.Remove((Action<SimDataRef>)entry.Callback);
+                    if (updated.IsEmpty)
+                    {
+                        _subscriptions.TryRemove(key, out _);
+                        lastConsumer = true;
+                    }
+                    else
+                    {
+                        _subscriptions[key] = (numSub.Element, updated);
+                    }
+                }
+                break;
+
+            case SubscriptionKind.String:
+                if (_stringSubscriptions.TryGetValue(key, out var strSub))
+                {
+                    var updated = strSub.Callbacks.Remove((Action<SimStringDataRef>)entry.Callback);
+                    if (updated.IsEmpty)
+                    {
+                        _stringSubscriptions.TryRemove(key, out _);
+                        lastConsumer = true;
+                    }
+                    else
+                    {
+                        _stringSubscriptions[key] = (strSub.Element, updated);
+                    }
+                }
+                break;
+        }
+
+        if (lastConsumer)
+        {
+            // Clean up index tracking
+            if (entry.Index >= 0 && _subscribedIndices.TryGetValue(entry.DataRefId, out var indices))
+            {
+                lock (indices)
+                {
+                    indices.Remove(entry.Index);
+                    if (indices.Count == 0)
+                        _subscribedIndices.TryRemove(entry.DataRefId, out _);
+                }
+            }
+
+            // Tell X-Plane to stop sending updates for this dataRef
+            await UnsubscribeDataRefsAsync([new DataRefSubscribeEntry
+            {
+                Id = entry.DataRefId,
+                Index = entry.Index >= 0 ? JsonSerializer.SerializeToElement(entry.Index) : null
+            }]);
+
+            _logger.LogDebug("Unsubscribed from X-Plane: dataRef id={Id}, index={Index} (last consumer removed)",
+                entry.DataRefId, entry.Index);
+        }
+        else
+        {
+            _logger.LogDebug("Removed consumer {SubId} from dataRef id={Id}, index={Index} (other consumers remain)",
+                subscriptionId, entry.DataRefId, entry.Index);
+        }
+    }
+
     /// <summary>Shared helper: tracks array index and delegates to <see cref="SubscribeDataRefsAsync"/>.</summary>
     private async Task SendDataRefSubscribeAsync(long id, int index)
     {
@@ -366,6 +457,7 @@ public sealed partial class XPlaneWebConnector
         _subscriptions.Clear();
         _stringSubscriptions.Clear();
         _subscribedIndices.Clear();
+        _subscriptionRegistry.Clear();
     }
 
     public async Task UnsubscribeAllCommandUpdatesAsync()

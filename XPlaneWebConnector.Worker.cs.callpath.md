@@ -106,16 +106,26 @@ ProcessIncomingMessage(XPlaneDataMessage)
 HandleWorkerCommandAsync(WorkerCommand, ct)
   │
   ├─ SubscribeNumeric
-  │    ├─ RegisterNumericSubscription(id, index, element, callback)
+  │    ├─ RegisterNumericSubscription(guid, id, index, element, callback)
+  │    │    └─ _subscriptionRegistry[guid] = new SubscriptionEntry(...)
   │    └─ SendDataRefSubscribeAsync(id, index)
   │         └─ SubscribeDataRefsAsync(datarefs)
   │              └─ SendWebSocketFireAndForgetAsync()               ──► Transport.cs
   │
   ├─ SubscribeString
-  │    ├─ RegisterStringSubscription(id, index, element, callback)
+  │    ├─ RegisterStringSubscription(guid, id, index, element, callback)
+  │    │    └─ _subscriptionRegistry[guid] = new SubscriptionEntry(...)
   │    └─ SendDataRefSubscribeAsync(id, index)
   │         └─ SubscribeDataRefsAsync(datarefs)
   │              └─ SendWebSocketFireAndForgetAsync()               ──► Transport.cs
+  │
+  ├─ UnsubscribeByGuid
+  │    └─ HandleUnsubscribeByGuidAsync(guid)
+  │         ├─ _subscriptionRegistry.TryRemove(guid)
+  │         ├─ remove callback from _subscriptions or _stringSubscriptions
+  │         └─ if last consumer:
+  │              ├─ clean up _subscribedIndices
+  │              └─ UnsubscribeDataRefsAsync()                      ──► Transport.cs
   │
   ├─ SubscribeCommandUpdates
   │    ├─ _commandSubscriptions.AddOrUpdate (inline)
@@ -124,7 +134,7 @@ HandleWorkerCommandAsync(WorkerCommand, ct)
   ├─ UnsubscribeAllDataRefs
   │    └─ UnsubscribeAllDataRefsAsync()
   │         ├─ SendWebSocketFireAndForgetAsync()                    ──► Transport.cs
-  │         └─ clears: _subscriptions, _stringSubscriptions, _subscribedIndices
+  │         └─ clears: _subscriptions, _stringSubscriptions, _subscribedIndices, _subscriptionRegistry
   │
   └─ UnsubscribeAllCommands
        └─ UnsubscribeAllCommandUpdatesAsync()
@@ -145,13 +155,14 @@ HandleWorkerCommandAsync(WorkerCommand, ct)
 | 5 | `DispatchArrayUpdate` | Dispatches array updates | HandleDataRefUpdates |
 | 6 | `DispatchStringUpdate` | Dispatches string updates | HandleDataRefUpdates |
 | 7 | `HandleCommandUpdates` | Parses command_update_is_active | ProcessIncomingMessage |
-| 8 | `RegisterNumericSubscription` | Registers numeric sub | HandleWorkerCommandAsync |
-| 9 | `RegisterStringSubscription` | Registers string sub | HandleWorkerCommandAsync |
+| 8 | `RegisterNumericSubscription` | Registers numeric sub + registry entry | HandleWorkerCommandAsync |
+| 9 | `RegisterStringSubscription` | Registers string sub + registry entry | HandleWorkerCommandAsync |
 | 10 | `HandleWorkerCommandAsync` | Main command dispatcher | HandleCommandAsync (Worker) |
-| 11 | `SendDataRefSubscribeAsync` | Tracks index + sends WS subscribe | HandleWorkerCommandAsync |
-| 12 | `SubscribeDataRefsAsync` | Sends WS dataref_subscribe_values | SendDataRefSubscribeAsync |
-| 13 | `UnsubscribeAllDataRefsAsync` | Sends WS unsubscribe + clears state | HandleWorkerCommandAsync |
-| 14 | `UnsubscribeAllCommandUpdatesAsync` | Sends WS unsubscribe + clears state | HandleWorkerCommandAsync |
+| 11 | `HandleUnsubscribeByGuidAsync` | Ref-counted unsubscribe by GUID | HandleWorkerCommandAsync |
+| 12 | `SendDataRefSubscribeAsync` | Tracks index + sends WS subscribe | HandleWorkerCommandAsync |
+| 13 | `SubscribeDataRefsAsync` | Sends WS dataref_subscribe_values | SendDataRefSubscribeAsync |
+| 14 | `UnsubscribeAllDataRefsAsync` | Sends WS unsubscribe + clears state | HandleWorkerCommandAsync |
+| 15 | `UnsubscribeAllCommandUpdatesAsync` | Sends WS unsubscribe + clears state | HandleWorkerCommandAsync |
 
 ---
 

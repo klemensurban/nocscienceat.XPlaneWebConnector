@@ -1,6 +1,6 @@
 ﻿# nocscienceat.XPlaneWebConnector
 
-A .NET library for communicating with **X-Plane 12.1.1+** via the built-in REST and WebSocket API (`/api/v3`).
+A .NET library for communicating with **X-Plane 12.1.1+** via the built-in REST and WebSocket API.
 
 Provides a high-level interface for subscribing to datarefs, setting dataref values, and sending commands — as well as full low-level access to the X-Plane web API surface.
 
@@ -8,12 +8,14 @@ Provides a high-level interface for subscribing to datarefs, setting dataref val
 
 ## Features
 
-- **WebSocket dataref subscriptions** — receive real-time value updates with callbacks
+- **WebSocket dataref subscriptions** — receive real-time value updates with callbacks; returns `IDisposable` for per-consumer unsubscription
+- **Disposable subscription handles** — multiple consumers can subscribe to the same dataref; disposing a handle removes only that consumer's callback; X-Plane is unsubscribed only when the last consumer disposes
 - **Dataref writes** — set numeric and string datarefs by path or `SimDataRef` instance
 - **Command execution** — send one-shot commands or control begin/end activation, with optional hold duration
 - **Selectable transport** — choose between WebSocket or HTTP (REST) for commands and dataref writes via `CommandSetDataRefTransport`
 - **Full REST API** — list/query datarefs and commands, read values, manage flights
 - **Automatic reconnection** — recovers from transient WebSocket disconnections
+- **Configurable API version** — select `v1`, `v2`, or `v3` to match your X-Plane version (12.3 uses `v2`, 12.4+ uses `v3`)
 - **Readiness probe** — optionally wait for a specific plugin dataref before proceeding
 - **Connection closed event** — detect when X-Plane shuts down for graceful cleanup
 - **Non-blocking architecture** — WebSocket reads and callback dispatching run on separate tasks; slow consumers never stall the receive loop
@@ -68,13 +70,12 @@ await connector.StopAsync();
 
 ### Interfaces
 
-The library exposes three interfaces, all implemented by `XPlaneWebConnector`:
+The library exposes two interfaces, both implemented by `XPlaneWebConnector`:
 
 | Interface | Purpose |
 |---|---|
-| `IXPlaneWebConnector` | High-level: subscribe to datarefs, set values, send commands |
+| `IXPlaneWebConnector` | High-level: subscribe to datarefs, set values, send commands, availability check, connection events |
 | `IXPlaneApi` | Low-level: full REST + WebSocket API (list datarefs/commands, manage flights, batch operations) |
-| `IXPlaneAvailabilityCheck` | Startup: wait for X-Plane API readiness, detect connection loss |
 
 ### Types
 
@@ -83,7 +84,8 @@ The library exposes three interfaces, all implemented by `XPlaneWebConnector`:
 | `SimDataRef` | Numeric dataref reference — holds the path and the latest `float` value |
 | `SimStringDataRef` | String/data-type dataref reference — holds the path and the latest `string` value |
 | `SimCommand` | Command reference — holds the command path and an optional description |
-| `CommandSetDataRefTransport` | Enum selecting the transport for commands and dataref writes: `WebSocket` (default) or `HttpPost` |
+| `CommandSetDataRefTransport` | Enum selecting the transport for commands and dataref writes: `WebSocket` (default) or `Http` |
+| `SubscriptionHandle` | `IDisposable` returned by `SubscribeAsync` — disposing removes the consumer's callback and unsubscribes from X-Plane when no consumers remain |
 
 ## Usage
 
@@ -98,7 +100,8 @@ var connector = new XPlaneWebConnector(
     logger: logger,                                      // ILogger<XPlaneWebConnector>
     httpClientFactory: httpClientFactory,                 // IHttpClientFactory for REST calls
     readinessProbeDataRef: null,                          // Optional: wait for this dataref to exist before ready
-    readinessProbeMaxRetries: 0                           // Optional: max retries for readiness probe (0 = unlimited)
+    readinessProbeMaxRetries: 0,                          // Optional: max retries for readiness probe (0 = unlimited)
+    apiVersion: "v2"                                      // API version: "v1", "v2" (12.3), or "v3" (12.4+)
 );
 ```
 
@@ -136,16 +139,14 @@ connector.Dispose();
 
 ### Waiting for X-Plane Availability
 
-Use `IXPlaneAvailabilityCheck` to block until X-Plane is ready — especially useful in hosted services:
+The availability check is part of `IXPlaneWebConnector` — especially useful in hosted services:
 
 ```csharp
-IXPlaneAvailabilityCheck check = connector;
-
 // Wait for the REST API to respond
-await check.WaitUntilAvailableAsync(cancellationToken: stoppingToken);
+await connector.WaitUntilAvailableAsync(cancellationToken: stoppingToken);
 
 // Or with a custom poll interval
-await check.WaitUntilAvailableAsync(
+await connector.WaitUntilAvailableAsync(
     pollInterval: TimeSpan.FromSeconds(5),
     cancellationToken: stoppingToken
 );
@@ -155,7 +156,7 @@ With a **readiness probe** configured, the connector also waits for a specific p
 
 ```csharp
 var connector = new XPlaneWebConnector(
-    "localhost", 8086, CommandSetDataRefTransport.WebSocket, logger, httpClientFactory,
+    "localhost", 8086, CommandSetDataRefTransport.WebSocket, false, logger, httpClientFactory,
     readinessProbeDataRef: "AirbusFBW/EnableExternalPower",
     readinessProbeMaxRetries: 30
 );
@@ -165,14 +166,18 @@ var connector = new XPlaneWebConnector(
 
 #### Numeric Datarefs
 
+`SubscribeAsync` returns an `IDisposable` handle. Disposing it removes the consumer's callback; when the last consumer for a dataref disposes, X-Plane is told to stop sending updates.
+
 ```csharp
 var altitude = new SimDataRef { DataRef = "sim/cockpit2/gauges/indicators/altitude_ft_pilot" };
 
-await connector.SubscribeAsync(altitude, (dataref, value) =>
+IDisposable sub = await connector.SubscribeAsync(altitude, dataref =>
 {
-    Console.WriteLine($"Altitude: {value:F0} ft");
-    // dataref.Value is also updated automatically
+    Console.WriteLine($"Altitude: {dataref.Value:F0} ft");
 });
+
+// Later, to unsubscribe this consumer:
+sub.Dispose();
 ```
 
 #### String Datarefs
@@ -180,9 +185,9 @@ await connector.SubscribeAsync(altitude, (dataref, value) =>
 ```csharp
 var tailNumber = new SimStringDataRef { DataRef = "sim/aircraft/view/acf_tailnum" };
 
-await connector.SubscribeAsync(tailNumber, (dataref, value) =>
+IDisposable sub = await connector.SubscribeAsync(tailNumber, dataref =>
 {
-    Console.WriteLine($"Tail: {value}");
+    Console.WriteLine($"Tail: {dataref.Value}");
 });
 ```
 
@@ -194,8 +199,26 @@ Subscribe to individual indices using bracket notation:
 var engine1N1 = new SimDataRef { DataRef = "sim/cockpit2/engine/indicators/N1_percent[0]" };
 var engine2N1 = new SimDataRef { DataRef = "sim/cockpit2/engine/indicators/N1_percent[1]" };
 
-await connector.SubscribeAsync(engine1N1, (_, v) => Console.WriteLine($"ENG1 N1: {v:F1}%"));
-await connector.SubscribeAsync(engine2N1, (_, v) => Console.WriteLine($"ENG2 N1: {v:F1}%"));
+var sub1 = await connector.SubscribeAsync(engine1N1, d => Console.WriteLine($"ENG1 N1: {d.Value:F1}%"));
+var sub2 = await connector.SubscribeAsync(engine2N1, d => Console.WriteLine($"ENG2 N1: {d.Value:F1}%"));
+```
+
+#### Multi-Consumer Subscriptions
+
+Multiple panels can subscribe to the same dataref independently:
+
+```csharp
+// Panel A subscribes
+var subA = await connector.SubscribeAsync(altitude, d => UpdatePanelA(d.Value));
+
+// Panel B subscribes to the same dataref
+var subB = await connector.SubscribeAsync(altitude, d => UpdatePanelB(d.Value));
+
+// Panel A shuts down — Panel B continues receiving updates
+subA.Dispose();
+
+// Panel B shuts down — now X-Plane is told to unsubscribe
+subB.Dispose();
 ```
 
 ### Setting Dataref Values
@@ -308,20 +331,18 @@ Register the connector in a DI container (e.g. with `Microsoft.Extensions.Hostin
 
 ```csharp
 builder.Services.AddSingleton<XPlaneWebConnector>(sp =>
-new XPlaneWebConnector(
-    "localhost", 8086,
-    CommandSetDataRefTransport.Http,      // or WebSocket
-    fireForgetOnHttpTransport: true,      // fire-and-forget HTTP writes
-    sp.GetRequiredService<ILogger<XPlaneWebConnector>>(),
-    sp.GetRequiredService<IHttpClientFactory>(),
-    readinessProbeDataRef: "AirbusFBW/EnableExternalPower",
-    readinessProbeMaxRetries: 30
-));
+    new XPlaneWebConnector(
+        "localhost", 8086,
+        CommandSetDataRefTransport.Http,      // or WebSocket
+        fireForgetOnHttpTransport: true,      // fire-and-forget HTTP writes
+        sp.GetRequiredService<ILogger<XPlaneWebConnector>>(),
+        sp.GetRequiredService<IHttpClientFactory>(),
+        readinessProbeDataRef: "AirbusFBW/EnableExternalPower",
+        readinessProbeMaxRetries: 30,
+        apiVersion: "v2"                      // "v2" for X-Plane 12.3, "v3" for 12.4+
+    ));
 
 builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
-    sp.GetRequiredService<XPlaneWebConnector>());
-
-builder.Services.AddSingleton<IXPlaneAvailabilityCheck>(sp =>
     sp.GetRequiredService<XPlaneWebConnector>());
 
 builder.Services.AddSingleton<IXPlaneApi>(sp =>
@@ -336,7 +357,8 @@ builder.Services.AddSingleton<IXPlaneApi>(sp =>
 │                                                      │
 │  IXPlaneWebConnector    IXPlaneApi                   │
 │   (subscribe, set,      (REST queries,               │
-│    send commands)        batch WS ops)               │
+│    send commands,        batch WS ops)               │
+│    availability)                                     │
 └───────────┬──────────────────┬───────────────────────┘
             │                  │
             ▼                  ▼
@@ -377,7 +399,17 @@ builder.Services.AddSingleton<IXPlaneApi>(sp =>
 - **Lazy ID resolution with caching** — dataref and command names are resolved to session IDs via REST on first use and cached for the lifetime of the connection.
 - **Automatic reconnection** — if the WebSocket connection drops, the connector retries once after 3 seconds before signalling `ConnectionClosed`.
 
-For a detailed overview of the internal data flow, see [dataflow.md](dataflow.md).
+## Documentation
+
+| Document | Description |
+|---|---|
+| [dataflow.md](dataflow.md) | Detailed internal data flow, threading model, and protocol interactions |
+| [ApiSpecifications.md](ApiSpecifications.md) | X-Plane Web API specification reference |
+| [XPlaneWebConnector.cs.callpath.md](XPlaneWebConnector.cs.callpath.md) | Call path diagram for the main partial class (public API, REST, lifecycle) |
+| [XPlaneWebConnector.Worker.cs.callpath.md](XPlaneWebConnector.Worker.cs.callpath.md) | Call path diagram for the Worker (subscription state, inbound dispatch) |
+| [XPlaneWebConnector.Transport.cs.callpath.md](XPlaneWebConnector.Transport.cs.callpath.md) | Call path diagram for WebSocket transport (receive loop, send helper) |
+| [XPlaneWebConnector.CallbackChannel.cs.callpath.md](XPlaneWebConnector.CallbackChannel.cs.callpath.md) | Call path diagram for the callback channel (final dispatch to consumers) |
+| [XPlaneWebConnector.Utility.cs.callpath.md](XPlaneWebConnector.Utility.cs.callpath.md) | Call path diagram for utility methods (path parsing, byte decoding) |
 
 ## License
 

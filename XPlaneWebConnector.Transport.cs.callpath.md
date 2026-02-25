@@ -92,11 +92,11 @@ SendWebSocketFireAndForgetAsync<T>(request, typeInfo)
 | Source File | Calling Method |
 |---|---|
 | **XPlaneWebConnector.cs** | `SetDataRefValuesByWsAsync` |
-| **XPlaneWebConnector.cs** | `UnsubscribeDataRefsAsync` |
 | **XPlaneWebConnector.cs** | `SubscribeCommandUpdatesAsync` |
 | **XPlaneWebConnector.cs** | `UnsubscribeCommandUpdatesAsync` |
 | **XPlaneWebConnector.cs** | `SetCommandActiveAsync` |
 | **Worker.cs** | `SubscribeDataRefsAsync` |
+| **Worker.cs** | `UnsubscribeDataRefsAsync` (selective, via HandleUnsubscribeByGuidAsync) |
 | **Worker.cs** | `UnsubscribeAllDataRefsAsync` |
 | **Worker.cs** | `UnsubscribeAllCommandUpdatesAsync` |
 | **Worker.cs** | `HandleWorkerCommandAsync` (SubscribeCommandUpdates case, inline) |

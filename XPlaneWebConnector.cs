@@ -21,7 +21,7 @@ namespace nocscienceat.XPlaneWebConnector;
 /// "result" responses while the receive loop is busy dispatching subscription
 /// callbacks, so we never block waiting for acknowledgements.
 /// </summary>
-public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi, IXPlaneAvailabilityCheck
+public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 {
     private readonly ILogger<XPlaneWebConnector> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
@@ -54,6 +54,11 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     // we need this map to correlate array positions back to the original indices.
     private readonly ConcurrentDictionary<long, SortedSet<int>> _subscribedIndices = new();
 
+    // Per-consumer subscription registry: each SubscribeAsync call gets a unique GUID.
+    // Multiple GUIDs can map to the same (Id, Index) when multiple panels subscribe
+    // to the same dataRef. Used for future per-consumer unsubscription with reference counting.
+    private readonly ConcurrentDictionary<Guid, SubscriptionEntry> _subscriptionRegistry = new();
+
     // Command activation subscriptions: command session ID ? callbacks
     private readonly ConcurrentDictionary<long, ImmutableArray<Action<long, bool>>> _commandSubscriptions = new();
 
@@ -80,13 +85,18 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     /// <inheritdoc />
     public event Action? ConnectionClosed;
 
+    private static readonly HashSet<string> SupportedApiVersions = ["v1", "v2", "v3"];
+
     public XPlaneWebConnector(string host, int port, CommandSetDataRefTransport commandTransport, bool fireForgetOnHttpTransport, ILogger<XPlaneWebConnector> logger, IHttpClientFactory httpClientFactory, 
-        string? readinessProbeDataRef = null, int readinessProbeMaxRetries = 0)
+        string? readinessProbeDataRef = null, int readinessProbeMaxRetries = 0, string apiVersion = "v2")
     {
+        if (!SupportedApiVersions.Contains(apiVersion))
+            throw new ArgumentException($"Unsupported API version '{apiVersion}'. Supported: {string.Join(", ", SupportedApiVersions)}", nameof(apiVersion));
+
         _logger = logger;
         _httpClientFactory = httpClientFactory;
-        _baseUrl = $"http://{host}:{port}/api/v3";
-        _wsUrl = $"ws://{host}:{port}/api/v3";
+        _baseUrl = $"http://{host}:{port}/api/{apiVersion}";
+        _wsUrl = $"ws://{host}:{port}/api/{apiVersion}";
         _capabilitiesUrl = $"http://{host}:{port}/api/capabilities";
         _readinessProbeDataRef = readinessProbeDataRef;
         _readinessProbeMaxRetries = readinessProbeMaxRetries;
@@ -254,6 +264,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         _subscriptions.Clear();
         _stringSubscriptions.Clear();
         _subscribedIndices.Clear();
+        _subscriptionRegistry.Clear();
         _logger.LogInformation("XPlaneWebConnector stopped");
     }
 
@@ -261,28 +272,32 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     // IXPlaneWebConnector: Subscribe to dataRef updates (WebSocket)
     // ========================================================================
 
-    public async Task SubscribeAsync(SimDataRef dataRef, Action<SimDataRef>? onchange = null)
+    public async Task<IDisposable> SubscribeAsync(SimDataRef dataRef, Action<SimDataRef>? onchange = null)
     {
         var (basePath, index) = ParseDataRefPath(dataRef.DataRefPath);
         var id = await ResolveDataRefIdAsync(basePath);
         var cb = onchange ?? ((_) => { });
+        var subId = Guid.NewGuid();
 
         await _commandChannel.Writer.SendCommandAsync(
-            new WorkerCommand.SubscribeNumeric(id, index, dataRef, cb));
+            new WorkerCommand.SubscribeNumeric(subId, id, index, dataRef, cb));
 
-        _logger.LogDebug("Subscribed to dataRef {Name} (id={Id}, index={Index})", dataRef.DataRefPath, id, index);
+        _logger.LogDebug("Subscribed to dataRef {Name} (id={Id}, index={Index}, subId={SubId})", dataRef.DataRefPath, id, index, subId);
+        return new SubscriptionHandle(subId, _commandChannel.Writer);
     }
 
-    public async Task SubscribeAsync(SimStringDataRef dataRef, Action<SimStringDataRef>? onchange = null)
+    public async Task<IDisposable> SubscribeAsync(SimStringDataRef dataRef, Action<SimStringDataRef>? onchange = null)
     {
         var (basePath, index) = ParseDataRefPath(dataRef.DataRefPath);
         var id = await ResolveDataRefIdAsync(basePath);
         var cb = onchange ?? ((_) => { });
+        var subId = Guid.NewGuid();
 
         await _commandChannel.Writer.SendCommandAsync(
-            new WorkerCommand.SubscribeString(id, index, dataRef, cb));
+            new WorkerCommand.SubscribeString(subId, id, index, dataRef, cb));
 
-        _logger.LogDebug("Subscribed to string dataRef {Name} (id={Id}, index={Index})", dataRef.DataRefPath, id, index);
+        _logger.LogDebug("Subscribed to string dataRef {Name} (id={Id}, index={Index}, subId={SubId})", dataRef.DataRefPath, id, index, subId);
+        return new SubscriptionHandle(subId, _commandChannel.Writer);
     }
 
     // ========================================================================
