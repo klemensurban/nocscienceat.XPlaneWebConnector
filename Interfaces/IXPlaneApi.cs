@@ -6,9 +6,11 @@ namespace nocscienceat.XPlaneWebConnector.Interfaces;
 /// <summary>
 /// Full X-Plane 12.1.1+ REST and WebSocket API surface.
 /// Covers all operations defined in the X-Plane web API specification.
-/// Implementations: <see cref="XPlaneWebConnector"/> (full), <see cref="XPlaneConnectorAdapter"/> (stubs).
+/// This interface serves as living documentation of the complete X-Plane API
+/// and is not intended to be consumed outside the library. Use
+/// <see cref="IXPlaneWebConnector"/> as the public-facing contract instead.
 /// </summary>
-public interface IXPlaneApi
+internal interface IXPlaneApi
 {
     // ========================================================================
     // REST: Capabilities
@@ -71,6 +73,9 @@ public interface IXPlaneApi
 
     // ========================================================================
     // WebSocket: Dataref subscriptions
+    // NOTE: These are low-level WebSocket messages. At runtime, subscriptions
+    // are routed through the Worker's command channel for thread safety.
+    // Kept here to document the full X-Plane API surface.
     // ========================================================================
 
     /// <summary>Subscribes to one or more dataref value updates via WebSocket.</summary>
@@ -84,6 +89,9 @@ public interface IXPlaneApi
 
     // ========================================================================
     // WebSocket: Command subscriptions
+    // NOTE: These are low-level WebSocket messages. At runtime, subscriptions
+    // are routed through the Worker's command channel for thread safety.
+    // Kept here to document the full X-Plane API surface.
     // ========================================================================
 
     /// <summary>Subscribes to command activation status updates.</summary>

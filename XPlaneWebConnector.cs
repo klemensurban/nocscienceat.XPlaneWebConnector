@@ -1,13 +1,12 @@
+using ChannelWorker;
 using Microsoft.Extensions.Logging;
 using nocscienceat.XPlaneWebConnector.Interfaces;
 using nocscienceat.XPlaneWebConnector.Models;
 using System.Collections.Concurrent;
 using System.Collections.Immutable;
-using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using System.Threading.Channels;
 
 namespace nocscienceat.XPlaneWebConnector;
@@ -36,6 +35,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     private CancellationTokenSource? _cts;
     private Task? _receiveTask;
     private Task? _callbackTask;
+    private Task? _workerTask;
 
     // Dataref session-ID caches (path ? id). Cleared when X-Plane restarts.
     private readonly ConcurrentDictionary<string, long> _dataRefIdCache = new();
@@ -60,13 +60,16 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     // Monotonically increasing request ID for WebSocket messages
     private int _nextReqId;
 
-    // Incoming WebSocket messages are queued here so the receive loop
+    // Data channel: WebSocket messages are queued here so the receive loop
     // is never blocked by slow callback processing (e.g. serial port writes).
-    private readonly Channel<ChannelMessage> _incomingMessages = Channel.CreateBounded<ChannelMessage>(
+    // Read by the Worker's HandleData on its dedicated thread.
+    private readonly Channel<XPlaneDataMessage> _dataChannel = Channel.CreateBounded<XPlaneDataMessage>(
         new BoundedChannelOptions(100) { FullMode = BoundedChannelFullMode.DropOldest, SingleReader = true });
 
-    private readonly Channel<ChannelMessage> _subscriptionMessages = Channel.CreateUnbounded<ChannelMessage>(
-        new UnboundedChannelOptions {  SingleReader = true });
+    // Command channel: subscription commands are sent here and processed
+    // by the Worker's HandleCommandAsync with talkback via TaskCompletionSource.
+    private readonly Channel<CommandEnvelope<WorkerCommand, bool>> _commandChannel = Channel.CreateUnbounded<CommandEnvelope<WorkerCommand, bool>>(
+        new UnboundedChannelOptions { SingleReader = true });
 
     private readonly Channel<CallbackItem> _callbacks = Channel.CreateUnbounded<CallbackItem>(new UnboundedChannelOptions { SingleReader = true });
 
@@ -76,12 +79,6 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
     /// <inheritdoc />
     public event Action? ConnectionClosed;
-
-    /// <summary>
-    /// Regex to extract array index from dataRef paths like "AirbusFBW/Foo[7]".
-    /// </summary>
-    [GeneratedRegex(@"^(.+)\[(\d+)\]$")]
-    private static partial Regex ArrayIndexRegex();
 
     public XPlaneWebConnector(string host, int port, CommandSetDataRefTransport commandTransport, bool fireForgetOnHttpTransport, ILogger<XPlaneWebConnector> logger, IHttpClientFactory httpClientFactory, 
         string? readinessProbeDataRef = null, int readinessProbeMaxRetries = 0)
@@ -196,17 +193,6 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         cancellationToken.ThrowIfCancellationRequested();
     }
 
-    // ========================================================================
-    // Dataref path parsing: "AirbusFBW/Foo[7]" ? ("AirbusFBW/Foo", 7)
-    // ========================================================================
-
-    private static (string BasePath, int Index) ParseDataRefPath(string path)
-    {
-        var match = ArrayIndexRegex().Match(path);
-        if (match.Success)
-            return (match.Groups[1].Value, int.Parse(match.Groups[2].Value));
-        return (path, -1);
-    }
 
     // ========================================================================
     // Lifecycle
@@ -217,6 +203,12 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         _cts = new CancellationTokenSource();
         _receiveTask = ConnectWebSocketAndReceiveAsync(_cts.Token);
         _callbackTask = StartCallbacksAsync(_cts.Token);
+
+        var handler = new DataRefWorkerHandler(this);
+        var worker = new Worker<WorkerCommand, bool, XPlaneDataMessage>(
+            _commandChannel, _dataChannel, handler, _logger);
+        _workerTask = worker.RunAsync(_cts.Token);
+
         _logger.LogInformation("XPlaneWebConnector started (REST: {RestUrl}, WS: {WsUrl})", _baseUrl, _wsUrl);
     }
 
@@ -226,12 +218,25 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         {
             await _cts.CancelAsync();
 
-            if (_receiveTask is not null)
-            {
-                try { await _receiveTask.WaitAsync(TimeSpan.FromMilliseconds(timeout)); }
-                catch (TimeoutException) { _logger.LogWarning("WebSocket receive loop did not stop within {Timeout}ms", timeout); }
-                catch (OperationCanceledException) { /* expected */ }
-            }
+            var tasks = new List<Task>();
+            if (_receiveTask is not null) tasks.Add(_receiveTask);
+            if (_callbackTask is not null) tasks.Add(_callbackTask);
+            if (_workerTask is not null) tasks.Add(_workerTask);
+
+            try { await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromMilliseconds(timeout)); }
+            catch (TimeoutException) { _logger.LogWarning("Background tasks did not stop within {Timeout}ms", timeout); }
+            catch (OperationCanceledException) { /* expected */ }
+        }
+
+        // The Worker is the sole consumer of subscription state.
+        // Await it specifically so the dictionaries are never cleared
+        // while HandleData/HandleCommandAsync is still running.
+        if (_workerTask is { IsCompleted: false })
+        {
+            _logger.LogDebug("Awaiting Worker shutdown before clearing subscription state ...");
+            try { await _workerTask.WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (OperationCanceledException) { /* expected */ }
+            catch (Exception ex) { _logger.LogWarning(ex, "Worker faulted during shutdown"); }
         }
 
         if (_webSocket is { State: WebSocketState.Open or WebSocketState.CloseReceived })
@@ -262,14 +267,8 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         var id = await ResolveDataRefIdAsync(basePath);
         var cb = onchange ?? ((_) => { });
 
-        bool added = false;
-        _subscriptions.AddOrUpdate(
-            (id, index),
-            _ => { added = true; return (dataref: dataRef, ImmutableArray.Create(cb)); },
-            (_, existing) => (existing.Element, existing.Callbacks.Add(cb)));
-
-        if (added)
-            await SendDataRefSubscribeAsync(id, index);
+        await _commandChannel.Writer.SendCommandAsync(
+            new WorkerCommand.SubscribeNumeric(id, index, dataRef, cb));
 
         _logger.LogDebug("Subscribed to dataRef {Name} (id={Id}, index={Index})", dataRef.DataRefPath, id, index);
     }
@@ -280,28 +279,10 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         var id = await ResolveDataRefIdAsync(basePath);
         var cb = onchange ?? ((_) => { });
 
-        bool added = false;
-        _stringSubscriptions.AddOrUpdate(
-            (id, index),
-            _ => { added = true; return (dataref: dataRef, ImmutableArray.Create(cb)); },
-            (_, existing) => (existing.Element, existing.Callbacks.Add(cb)));
-
-        if (added)
-            await SendDataRefSubscribeAsync(id, index);
+        await _commandChannel.Writer.SendCommandAsync(
+            new WorkerCommand.SubscribeString(id, index, dataRef, cb));
 
         _logger.LogDebug("Subscribed to string dataRef {Name} (id={Id}, index={Index})", dataRef.DataRefPath, id, index);
-    }
-
-    /// <summary>Shared helper: tracks array index and delegates to <see cref="SubscribeDataRefsAsync"/>.</summary>
-    private async Task SendDataRefSubscribeAsync(long id, int index)
-    {
-        if (index >= 0)
-        {
-            var indices = _subscribedIndices.GetOrAdd(id, _ => new SortedSet<int>());
-            lock (indices) { indices.Add(index); }
-        }
-
-        await SubscribeDataRefsAsync([new DataRefSubscribeEntry { Id = id, Index = index >= 0 ? JsonSerializer.SerializeToElement(index) : null }]);
     }
 
     // ========================================================================
@@ -392,515 +373,6 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
         _logger.LogDebug("Sent command {Name} (id={Id}, transport={Transport}, duration={Duration}s)",
             command.Command, id, _transport, duration);
-    }
-
-    private async Task StartCallbacksAsync(CancellationToken ct)
-    {
-        try
-        {
-            Task processingTask = Task.Run(() => ProcessCallbackChannelAsync(ct), ct);
-            await processingTask;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Exception while setting up callback Task");
-        }
-        finally
-        {
-            _callbacks.Writer.TryComplete();
-        }
-
-    }
-
-    // ========================================================================
-    // WebSocket connection and receive loop
-    // ========================================================================
-
-    private async Task ConnectWebSocketAndReceiveAsync(CancellationToken ct)
-    {
-        // Process incoming messages on a dedicated background task so the
-        // receive loop is never blocked by slow callback processing (serial writes).
-        var processingTask = Task.Run(() => ProcessIncomingMessagesAsync(ct), ct);
-
-        try
-        {
-            while (!ct.IsCancellationRequested)
-            {
-                try
-                {
-                    _webSocket?.Dispose();
-                    _webSocket = new ClientWebSocket();
-                    await _webSocket.ConnectAsync(new Uri(_wsUrl), ct);
-                    _logger.LogInformation("WebSocket connected to {Url}", _wsUrl);
-
-                    await ReceiveLoopAsync(ct);
-
-                    // If the server closed cleanly the ConnectionClosed event was
-                    // already raised — stop the reconnect loop so the host can
-                    // shut down gracefully instead of retrying with stale state.
-                    if (_webSocket.State == WebSocketState.CloseReceived)
-                    {
-                        _logger.LogInformation("Server closed connection, stopping reconnect loop");
-                        break;
-                    }
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning("WebSocket connection lost ({Error}), retrying once in 3s...", ex.Message);
-                    _logger.LogDebug(ex, "WebSocket connection lost details");
-                    try { await Task.Delay(3000, ct); } catch (OperationCanceledException) { break; }
-
-                    try
-                    {
-                        _webSocket?.Dispose();
-                        _webSocket = new ClientWebSocket();
-                        await _webSocket.ConnectAsync(new Uri(_wsUrl), ct);
-                        _logger.LogInformation("WebSocket reconnected to {Url}", _wsUrl);
-                        continue; // success — re-enter the loop to start ReceiveLoopAsync
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                    {
-                        break;
-                    }
-                    catch (Exception retryEx)
-                    {
-                        _logger.LogWarning("WebSocket reconnect failed ({Error}), signalling connection closed", retryEx.Message);
-                        _logger.LogDebug(retryEx, "WebSocket reconnect failure details");
-                        ConnectionClosed?.Invoke();
-                        break;
-                    }
-                }
-            }
-        }
-        finally
-        {
-            _incomingMessages.Writer.TryComplete();
-            await processingTask;
-        }
-    }
-
-
-    /// <summary>
-    /// Reads WebSocket frames as fast as possible and enqueues them for
-    /// processing.  Never calls user callbacks — that happens on the
-    /// processing task — so serial-port writes cannot stall the read.
-    /// </summary>
-    private async Task ReceiveLoopAsync(CancellationToken ct)
-    {
-        var buffer = new byte[8192];
-        int counter = 0;
-        long timeStamp;
-        while (_webSocket?.State == WebSocketState.Open && !ct.IsCancellationRequested)
-        {
-            var result = await _webSocket.ReceiveAsync(buffer, ct);
-
-            if (result.MessageType == WebSocketMessageType.Close)
-            {
-                ConnectionClosed?.Invoke();
-                return;
-            }
-
-            byte[] messageBytes;
-
-            if (result.EndOfMessage)
-            {
-                // Fast path: single-frame message (most common).
-                // One exact-size allocation, no MemoryStream, no ToArray() copy.
-                messageBytes = GC.AllocateUninitializedArray<byte>(result.Count);
-                buffer.AsSpan(0, result.Count).CopyTo(messageBytes);
-            }
-            else
-            {
-                // Slow path: multi-frame message — assemble with ArrayPool
-                _logger.LogInformation("Multiframe Message from XPlane - take slow path");
-                messageBytes = await AssembleMultiFrameMessageAsync(buffer, result.Count, ct);
-            }
-
-            bool statistic = false;
-            // if (counter++ == 1024) timeStamp = Stopwatch.GetTimestamp(),  0 otherwise
-            if ((counter++ & 128) == 0)
-                timeStamp = 0;
-            else
-            {
-                timeStamp = Stopwatch.GetTimestamp();
-                counter = 0;
-                statistic = true;
-            }
-
-            ChannelMessage.DataMessage dataMessage = new(timeStamp, messageBytes);
-            _incomingMessages.Writer.TryWrite(dataMessage);
-            if (statistic)
-                _logger.LogInformation("Number of Messages in Incoming-Queue: {n}", _incomingMessages.Reader.Count);
-        }
-    }
-
-    /// <summary>
-    /// Assembles a multi-frame WebSocket message using pooled buffers
-    /// for intermediate storage. Returns an exact-size byte[].
-    /// </summary>
-    private async Task<byte[]> AssembleMultiFrameMessageAsync(byte[] buffer, int firstFrameCount, CancellationToken ct)
-    {
-        var pool = System.Buffers.ArrayPool<byte>.Shared;
-        var assembled = pool.Rent(buffer.Length * 2);
-        int totalLength = 0;
-
-        try
-        {
-            // Copy first frame data
-            buffer.AsSpan(0, firstFrameCount).CopyTo(assembled);
-            totalLength = firstFrameCount;
-
-            WebSocketReceiveResult result;
-            do
-            {
-                result = await _webSocket!.ReceiveAsync(buffer, ct);
-
-                // Grow pooled buffer if needed
-                if (totalLength + result.Count > assembled.Length)
-                {
-                    var larger = pool.Rent((totalLength + result.Count) * 2);
-                    assembled.AsSpan(0, totalLength).CopyTo(larger);
-                    pool.Return(assembled);
-                    assembled = larger;
-                }
-
-                buffer.AsSpan(0, result.Count).CopyTo(assembled.AsSpan(totalLength));
-                totalLength += result.Count;
-            }
-            while (!result.EndOfMessage);
-
-            // Exact-size copy for the channel (pooled buffer is returned below)
-            var final = GC.AllocateUninitializedArray<byte>(totalLength);
-            assembled.AsSpan(0, totalLength).CopyTo(final);
-            return final;
-        }
-        finally
-        {
-            pool.Return(assembled);
-        }
-    }
-
-    private async Task ProcessCallbackChannelAsync(CancellationToken ct)
-    {
-        try
-        {
-            await foreach (CallbackItem callbackItem in _callbacks.Reader.ReadAllAsync(ct))
-            {
-                try
-                {
-                    // based on callbackItem record type (simulated discriminated union) do appropriate call back
-                    switch (callbackItem)
-                    {
-                        case CallbackItem.SimDataRefCb cb:
-                             cb.Callback(cb.Element);
-                            break;
-                        case CallbackItem.SimStringDataRefCb cb: 
-                            cb.Callback(cb.Element); 
-                            break;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Error processing Callback Channel ");
-                }
-            }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-    }
-
-    /// <summary>
-    /// Background task that drains the incoming message queue and dispatches
-    /// callbacks.  Runs on its own thread so slow serial-port writes do not
-    /// block WebSocket reads.
-    /// </summary>
-    private async Task ProcessIncomingMessagesAsync(CancellationToken ct)
-    {
-        PriorityChannelReader<ChannelMessage> priorityChannelReader = new(_subscriptionMessages, _incomingMessages);
-        try
-        {
-            //await foreach (ChannelMessage channelMessage in _incomingMessages.Reader.ReadAllAsync(ct))
-            await foreach (ChannelMessage channelMessage in priorityChannelReader.ReadAllAsync(ct))
-            {
-                try
-                {
-                    switch (channelMessage)
-                    {
-                        case ChannelMessage.DataMessage dataMessage:
-                            ProcessIncomingMessage(dataMessage);
-                            break;
-                        case ChannelMessage.SubscribeCommandMessage subscribeCommandMessage:
-                            break;
-                        case ChannelMessage.SubscribeNumericMessage subscribeNumericMessage:
-                            break;
-                        case ChannelMessage.SubscribeStringMessage subscribeStringMessage:
-                            break;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Error processing incoming WebSocket message");
-                }
-            }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-    }
-
-    // ========================================================================
-    // Incoming WebSocket message processing
-    // ========================================================================
-
-    private void ProcessIncomingMessage(ChannelMessage.DataMessage dataMessage)
-    {
-        byte[] messageBytes = dataMessage.Data;
-        using var doc = JsonDocument.Parse(messageBytes);
-        
-        var root = doc.RootElement;
-
-        if (!root.TryGetProperty("type", out var typeProp))
-            return;
-
-        switch (typeProp.GetString())
-        {
-            case "dataref_update_values":
-                HandleDataRefUpdates(root, dataMessage.TimeStamp);
-                break;
-
-            case "command_update_is_active":
-                HandleCommandUpdates(root);
-                break;
-
-            case "result":
-                WsResultMessage? result = JsonSerializer.Deserialize(messageBytes, XPlaneJsonContext.Default.WsResultMessage);
-                if (result is not null && !result.Success)
-                    _logger.LogWarning("WebSocket request {ReqId} failed: [{Code}] {Message}",
-                        result.ReqId, result.ErrorCode, result.ErrorMessage);
-                break;
-
-            default:
-                _logger.LogWarning("Unhandled WebSocket message type: {Type}", typeProp.GetString());
-                break;
-        }
-    }
-
-    /// <summary>
-    /// Dispatches dataref_update_values to registered callbacks.
-    /// The "data" object has dynamic keys (dataRef session IDs as strings)
-    /// with values that are either scalars or arrays — parsed with JsonDocument.
-    /// </summary>
-    private void HandleDataRefUpdates(JsonElement root, long timeStamp)
-    {
-        if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
-            return;
-
-        foreach (var prop in data.EnumerateObject())
-        {
-            if (!long.TryParse(prop.Name, out var id))
-                continue;
-
-            switch (prop.Value.ValueKind)
-            {
-                case JsonValueKind.Number:
-                    DispatchScalarUpdate(id, (float)prop.Value.GetDouble(), timeStamp);
-                    break;
-
-                case JsonValueKind.Array:
-                    DispatchArrayUpdate(id, prop.Value, timeStamp);
-                    break;
-
-                case JsonValueKind.String:
-                    DispatchStringUpdate(id, prop.Value.GetString() ?? "", timeStamp);
-                    break;
-            }
-        }
-    }
-
-    private void DispatchScalarUpdate(long id, float value, long timeStamp)
-    {
-        if (_subscriptions.TryGetValue((id, -1), out var sub))
-        {
-            if (_reverseDataRefIdCache.TryGetValue(id, out string name))            {
-                _logger.LogDebug("Received scalar update for dataRef {Name} (id={Id}): {Value}", name, id, value);
-            }
-            sub.Element.Value = value;
-            sub.Element.TimeSTamp = timeStamp;
-            foreach (Action<SimDataRef> cb in sub.Callbacks)
-            {
-                // try { cb(sub.Element); }
-                // catch (Exception ex) { _logger.LogWarning(ex, "Error in dataRef callback for id {Id}", id); }
-                _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, sub.Element));
-            }
-        }
-    }
-
-    private void DispatchArrayUpdate(long id, JsonElement arrayElement, long timeStamp)
-    {
-        // Check for string subscriptions first (data-type datarefs sent as arrays)
-        if (_stringSubscriptions.TryGetValue((id, -1), out var strSub))
-        {
-            string decoded = DecodeByteArrayToString(arrayElement);
-            strSub.Element.Value = decoded;
-            strSub.Element.TimeSTamp = timeStamp;
-            if (_reverseDataRefIdCache.TryGetValue(id, out string name))
-            {
-                _logger.LogDebug("Received array update(string) for dataRef {Name} (id={Id}): {Value}", name, id, decoded);
-            }
-
-            foreach (var cb in strSub.Callbacks)
-            {
-                //try { cb(strSub.Element); }
-                //catch (Exception ex) { _logger.LogWarning(ex, "Error in string dataRef callback for id {Id}", id); }
-                _callbacks.Writer.TryWrite(new CallbackItem.SimStringDataRefCb(cb, strSub.Element));
-            }
-            return;
-        }
-
-        // Numeric array: map positional values back to subscribed indices
-        if (_subscribedIndices.TryGetValue(id, out var indices))
-        {
-            int[] sortedIndices;
-            lock (indices) { sortedIndices = [.. indices]; }
-
-            int pos = 0;
-            foreach (var element in arrayElement.EnumerateArray())
-            {
-                if (pos >= sortedIndices.Length) break;
-                var idx = sortedIndices[pos];
-                var val = (float)element.GetDouble();
-
-                if (_subscriptions.TryGetValue((id, idx), out var sub))
-                {
-                    if (_reverseDataRefIdCache.TryGetValue(id, out string name))
-                    {
-                        // if (name != "AirbusFBW/BatVolts")
-                            _logger.LogDebug("Received array update(indexed) for dataRef {Name} (id={Id}), Index {idx} : {Value}", name, id, idx, val );
-                    }
-                    sub.Element.Value = val;
-                    sub.Element.TimeSTamp = timeStamp;
-                    foreach (var cb in sub.Callbacks)
-                    {
-                        //try { cb(sub.Element); }
-                        //catch (Exception ex) { _logger.LogWarning(ex, "Error in dataRef callback for id {Id}[{Index}]", id, idx); }
-                        _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, sub.Element));
-                    }
-                }
-                pos++;
-            }
-        }
-        else
-        {
-            // No specific indices subscribed — treat whole array as full subscription
-            int pos = 0;
-            foreach (var element in arrayElement.EnumerateArray())
-            {
-                if (_subscriptions.TryGetValue((id, pos), out var sub))
-                {
-                    var val = (float)element.GetDouble();
-                    sub.Element.Value = val;
-                    sub.Element.TimeSTamp = timeStamp;
-                    if (_reverseDataRefIdCache.TryGetValue(id, out string name))
-                    {
-                        _logger.LogDebug("Received array update(full) for dataRef {Name} (id={Id})  : {Value}", name, id, val);
-                    }
-                    foreach (var cb in sub.Callbacks)
-                    {
-                        //try { cb(sub.Element); }
-                        //catch (Exception ex) { _logger.LogWarning(ex, "Error in dataRef callback for id {Id}[{Index}]", id, pos); }
-                        _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, sub.Element));
-                    }
-                }
-                pos++;
-            }
-        }
-    }
-
-    private void DispatchStringUpdate(long id, string base64, long timeStamp)
-    {
-        string decoded;
-        try { decoded = Encoding.UTF8.GetString(Convert.FromBase64String(base64)); }
-        catch { decoded = base64; }
-
-        if (_stringSubscriptions.TryGetValue((id, -1), out var sub))
-        {
-            if (_reverseDataRefIdCache.TryGetValue(id, out string name))
-            {
-                _logger.LogDebug("Received string for dataRef {Name} (id={Id}): {Value}", name, id, decoded);
-            }
-            sub.Element.Value = decoded;
-            sub.Element.TimeSTamp = timeStamp;
-            foreach (var cb in sub.Callbacks)
-            {
-                //try { cb(sub.Element); }
-                //catch (Exception ex) { _logger.LogWarning(ex, "Error in string dataRef callback for id {Id}", id); }
-                _callbacks.Writer.TryWrite(new CallbackItem.SimStringDataRefCb(cb, sub.Element));
-            }
-        }
-    }
-
-    private static string DecodeByteArrayToString(JsonElement arrayElement)
-    {
-        // data-type arrays: each element is a byte ? reassemble and decode
-        var bytes = new byte[arrayElement.GetArrayLength()];
-        int i = 0;
-        foreach (var el in arrayElement.EnumerateArray())
-        {
-            bytes[i++] = (byte)el.GetInt32();
-        }
-        // Trim trailing nulls
-        int len = Array.IndexOf(bytes, (byte)0);
-        return Encoding.UTF8.GetString(bytes, 0, len >= 0 ? len : bytes.Length);
-    }
-
-    /// <summary>
-    /// Dispatches command_update_is_active to registered callbacks.
-    /// </summary>
-    private void HandleCommandUpdates(JsonElement root)
-    {
-        if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
-            return;
-
-        foreach (var prop in data.EnumerateObject())
-        {
-            if (!long.TryParse(prop.Name, out var id))
-                continue;
-
-            if (!_commandSubscriptions.TryGetValue(id, out var callbacks))
-                continue;
-
-            var isActive = prop.Value.ValueKind == JsonValueKind.True;
-            if (_reverseCommandIdCache.TryGetValue(id, out string path))
-            {
-                _logger.LogDebug("Received HandleCommand for Commandpath {Name} (id={Id}):  active={active}", path , id, isActive);
-            }
-            foreach (var cb in callbacks)
-            {
-                //try { cb(id, isActive); }
-                //catch (Exception ex) { _logger.LogWarning(ex, "Error in command callback for id {Id}", id); }
-                _callbacks.Writer.TryWrite(new CallbackItem.CommandCb(cb, id, isActive ));
-            }
-        }
-    }
-
-    // ========================================================================
-    // WebSocket send helper
-    // ========================================================================
-
-    /// <summary>
-    /// Sends a fire-and-forget WebSocket message.
-    /// X-Plane does not reliably deliver "result" responses while the receive loop
-    /// is busy dispatching subscription callbacks (serial port writes, etc.),
-    /// so we never block waiting for acknowledgements.
-    /// </summary>
-    private async Task SendWebSocketFireAndForgetAsync<T>(T request, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo)
-    {
-        if (_webSocket?.State != WebSocketState.Open)
-            throw new InvalidOperationException("WebSocket is not connected");
-
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(request, typeInfo);
-        await _webSocket.SendAsync(bytes, WebSocketMessageType.Text, true, _cts?.Token ?? CancellationToken.None);
     }
 
     // ========================================================================
@@ -1051,17 +523,6 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     // IXPlaneApi: WebSocket — Dataref unsubscribe
     // ========================================================================
 
-    public async Task SubscribeDataRefsAsync(IEnumerable<DataRefSubscribeEntry> datarefs)
-    {
-        var request = new WsRequest<DataRefSubscribeParams>
-        {
-            ReqId = Interlocked.Increment(ref _nextReqId),
-            Type = "dataref_subscribe_values",
-            Params = new DataRefSubscribeParams { Datarefs = [.. datarefs] }
-        };
-        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
-    }
-
     public async Task UnsubscribeDataRefsAsync(IEnumerable<DataRefSubscribeEntry> datarefs)
     {
         var request = new WsRequest<DataRefSubscribeParams>
@@ -1071,20 +532,6 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             Params = new DataRefSubscribeParams { Datarefs = [.. datarefs] }
         };
         await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
-    }
-
-    public async Task UnsubscribeAllDataRefsAsync()
-    {
-        var request = new WsRequest<DataRefUnsubscribeAllParams>
-        {
-            ReqId = Interlocked.Increment(ref _nextReqId),
-            Type = "dataref_unsubscribe_values",
-            Params = new DataRefUnsubscribeAllParams()
-        };
-        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefUnsubscribeAllParams);
-        _subscriptions.Clear();
-        _stringSubscriptions.Clear();
-        _subscribedIndices.Clear();
     }
 
     // ========================================================================
@@ -1253,18 +700,6 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             Params = new CommandSubscribeParams { Commands = entries }
         };
         await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
-    }
-
-    public async Task UnsubscribeAllCommandUpdatesAsync()
-    {
-        var request = new WsRequest<CommandUnsubscribeAllParams>
-        {
-            ReqId = Interlocked.Increment(ref _nextReqId),
-            Type = "command_unsubscribe_is_active",
-            Params = new CommandUnsubscribeAllParams()
-        };
-        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandUnsubscribeAllParams);
-        _commandSubscriptions.Clear();
     }
 
     // ========================================================================
