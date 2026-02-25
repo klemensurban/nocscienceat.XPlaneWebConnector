@@ -35,11 +35,18 @@ dotnet add package nocscienceat.XPlaneWebConnector
 ## Quick Start
 
 ```csharp
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using nocscienceat.XPlaneWebConnector;
 
 using var loggerFactory = LoggerFactory.Create(b => b.AddConsole());
 var logger = loggerFactory.CreateLogger<XPlaneWebConnector>();
+
+// Create an IHttpClientFactory (requires Microsoft.Extensions.Http)
+var services = new ServiceCollection();
+services.AddHttpClient();
+using var provider = services.BuildServiceProvider();
+var httpClientFactory = provider.GetRequiredService<IHttpClientFactory>();
 
 // Create and start the connector
 var connector = new XPlaneWebConnector("localhost", 8086, CommandSetDataRefTransport.WebSocket, fireForgetOnHttpTransport: false, logger, httpClientFactory);
@@ -47,9 +54,9 @@ connector.Start();
 
 // Subscribe to a dataref
 var heading = new SimDataRef { DataRef = "sim/cockpit/autopilot/heading_mag" };
-await connector.SubscribeAsync(heading, (dataref, value) =>
+await connector.SubscribeAsync(heading, dataref =>
 {
-    Console.WriteLine($"Heading: {value:F1}°");
+    Console.WriteLine($"Heading: {dataref.Value:F1}°");
 });
 
 // Set a dataref value
@@ -68,14 +75,15 @@ await connector.StopAsync();
 
 ## Core Concepts
 
-### Interfaces
+### Interface
 
-The library exposes two interfaces, both implemented by `XPlaneWebConnector`:
+The library exposes one public interface, implemented by `XPlaneWebConnector`:
 
 | Interface | Purpose |
 |---|---|
-| `IXPlaneWebConnector` | High-level: subscribe to datarefs, set values, send commands, availability check, connection events |
-| `IXPlaneApi` | Low-level: full REST + WebSocket API (list datarefs/commands, manage flights, batch operations) |
+| `IXPlaneWebConnector` | Subscribe to datarefs, set values, send commands, availability check, connection events |
+
+> **Note:** `IXPlaneApi` exists as an `internal` interface that documents the full X-Plane REST + WebSocket API surface. It is not intended for external consumption — all public functionality is available through `IXPlaneWebConnector`.
 
 ### Types
 
@@ -264,66 +272,9 @@ connector.ConnectionClosed += () =>
 };
 ```
 
-### Low-Level API (`IXPlaneApi`)
+### Internal API (`IXPlaneApi`)
 
-For advanced use cases, cast the connector to `IXPlaneApi`:
-
-```csharp
-IXPlaneApi api = connector;
-
-// Query capabilities
-var caps = await api.GetCapabilitiesAsync();
-Console.WriteLine($"X-Plane version: {caps?.XPlane?.Version}");
-Console.WriteLine($"API versions: {string.Join(", ", caps?.Api?.Versions ?? [])}");
-
-// List datarefs with filtering
-var datarefs = await api.ListDataRefsAsync(
-    filterNames: ["sim/cockpit/autopilot/heading_mag"],
-    fields: "id,name"
-);
-
-// Get dataref count
-int count = await api.GetDataRefCountAsync();
-
-// Read a dataref value by ID
-var value = await api.GetDataRefValueAsync(id: 42);
-
-// Set a dataref value by ID
-using var doc = JsonDocument.Parse("1.0");
-await api.SetDataRefValueByIdAsync(id: 42, value: doc.RootElement.Clone());
-
-// List commands
-var commands = await api.ListCommandsAsync(limit: 10);
-
-// Activate a command by ID with duration
-await api.ActivateCommandAsync(id: 100, duration: 0.5f);
-
-// Command begin/end control via WebSocket
-await api.SetCommandActiveAsync(id: 100, isActive: true);   // begin
-await Task.Delay(500);
-await api.SetCommandActiveAsync(id: 100, isActive: false);  // end
-
-// Flight management
-using var flightDoc = JsonDocument.Parse("""{ "airport": "EDDM" }""");
-await api.StartFlightAsync(flightDoc.RootElement.Clone());
-
-// Batch dataref writes via WebSocket
-await api.SetDataRefValuesByWsAsync([
-    new DataRefSetEntry { Id = 42, Value = doc.RootElement.Clone() },
-    new DataRefSetEntry { Id = 43, Value = doc.RootElement.Clone(), Index = 0 }
-]);
-
-// Subscribe/unsubscribe at the WebSocket level
-await api.SubscribeDataRefsAsync([new DataRefSubscribeEntry { Id = 42 }]);
-await api.UnsubscribeAllDataRefsAsync();
-
-// Command activation subscriptions
-await api.SubscribeCommandUpdatesAsync([100, 101], (commandId, isActive) =>
-{
-    Console.WriteLine($"Command {commandId} active: {isActive}");
-});
-await api.UnsubscribeAllCommandUpdatesAsync();
-```
+The `IXPlaneApi` interface is `internal` and documents the full X-Plane REST + WebSocket API surface used by `XPlaneWebConnector` internally. It covers capabilities queries, dataref/command listing, flight management, batch WebSocket operations, and low-level subscribe/unsubscribe messages. See [`ApiSpecifications.md`](ApiSpecifications.md) for the complete X-Plane API reference.
 
 ## Dependency Injection
 
@@ -343,10 +294,7 @@ builder.Services.AddSingleton<XPlaneWebConnector>(sp =>
     ));
 
 builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
-    sp.GetRequiredService<XPlaneWebConnector>());
-
-builder.Services.AddSingleton<IXPlaneApi>(sp =>
-    sp.GetRequiredService<XPlaneWebConnector>());
+sp.GetRequiredService<XPlaneWebConnector>());
 ```
 
 ## Architecture
@@ -355,13 +303,13 @@ builder.Services.AddSingleton<IXPlaneApi>(sp =>
 ┌──────────────────────────────────────────────────────┐
 │                  Your Application                    │
 │                                                      │
-│  IXPlaneWebConnector    IXPlaneApi                   │
-│   (subscribe, set,      (REST queries,               │
-│    send commands,        batch WS ops)               │
-│    availability)                                     │
-└───────────┬──────────────────┬───────────────────────┘
-            │                  │
-            ▼                  ▼
+│  IXPlaneWebConnector                                 │
+│   (subscribe, set values,                            │
+│    send commands,                                    │
+│    availability check)                               │
+└──────────────────────────┬───────────────────────────┘
+                           │
+                           ▼
 ┌──────────────────────────────────────────────────────┐
 │              XPlaneWebConnector                      │
 │                                                      │
