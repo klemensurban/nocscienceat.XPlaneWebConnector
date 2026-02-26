@@ -29,7 +29,7 @@ This document provides a detailed description of the internal data flows, thread
 
 The library provides two abstraction levels:
 
-- **High-level** (`IXPlaneWebConnector`): Subscribe to datarefs with callbacks (returns `IDisposable` for per-consumer unsubscription), set values by path, send commands by name, wait for X-Plane availability, detect connection loss. The library handles name→ID resolution, WebSocket framing, and JSON serialization transparently.
+- **High-level** (`IXPlaneWebConnector`): Subscribe to datarefs and command activation status with callbacks (returns `IDisposable` for per-consumer unsubscription), set values by path, send commands by name, wait for X-Plane availability, detect connection loss. The library handles name→ID resolution, WebSocket framing, and JSON serialization transparently.
 - **Low-level** (`IXPlaneApi`): Direct access to the X-Plane REST endpoints and raw WebSocket operations using session IDs.
 
 ### System Context
@@ -92,13 +92,13 @@ The two interfaces are implemented by a single class (`XPlaneWebConnector`) but 
  │ ConnectionClosed event  │  │ SetDataRefValueByIdAs()  │
  │ SubscribeAsync()        │  │ SetDataRefValuesByWs()   │
  │  → returns IDisposable  │  │ ListCommandsAsync()      │
- │ SetDataRefValueAsync()  │  │ GetCommandCountAsync()   │
- │ SendCommandAsync()      │  │ ActivateCommandAsync()   │
- │ SendCommandAsync(,dur)  │  │ StartFlightAsync()       │
- │ Dispose()               │  │ UpdateFlightAsync()      │
- └─────────────────────────┘  │ SubscribeDataRefsAsync() │
-                               │ UnsubscribeDataRefsAs()  │
-                               │ UnsubscribeAllDataRefs() │
+ │ SubscribeCommandAsync() │  │ GetCommandCountAsync()   │
+ │  → returns IDisposable  │  │ ActivateCommandAsync()   │
+ │ SetDataRefValueAsync()  │  │ StartFlightAsync()       │
+ │ SendCommandAsync()      │  │ UpdateFlightAsync()      │
+ │ SendCommandAsync(,dur)  │  │ SubscribeDataRefsAsync() │
+ │ Dispose()               │  │ UnsubscribeDataRefsAs()  │
+ └─────────────────────────┘  │ UnsubscribeAllDataRefs() │
                                │ Subscribe/Unsub CmdUpd() │
                                │ SetCommandActiveAsync()  │
                                └──────────────────────────┘
@@ -109,6 +109,7 @@ The two interfaces are implemented by a single class (`XPlaneWebConnector`) but 
 | Use case | Interface | Example |
 |---|---|---|
 | Subscribe to a dataref with a callback | `IXPlaneWebConnector` | Panel LED updates |
+| Subscribe to command activation status | `IXPlaneWebConnector` | Engine master monitoring |
 | Unsubscribe a single consumer | Dispose the `IDisposable` handle | Panel shutdown |
 | Set a switch position by dataref path | `IXPlaneWebConnector` | Toggle landing lights |
 | Send a one-shot command by name | `IXPlaneWebConnector` | APU master on |
@@ -133,7 +134,7 @@ The library uses three primary types for consumer-facing dataref and command ref
        └── SimStringDataRef    DataRef: string, Value: string
                                String/data-type datarefs (tail number, etc.)
 
-  SimCommand                   Command: string, Description: string
+  SimCommand                   Command: string
                                Command reference (e.g. "sim/autopilot/heading_up")
 ```
 
@@ -228,7 +229,7 @@ X-Plane                          Library                       Consumer
 
 ## 5. Outbound Dataflow: Consumer → X-Plane
 
-There are three outbound paths, each with a different protocol and purpose.
+There are four outbound paths, each with a different protocol and purpose.
 
 ### 5.1 Subscribe to Dataref (High-Level)
 
@@ -259,6 +260,39 @@ Consumer                         Library                                      X-
    │                                │           { id: 42, index: 7 }             │
    │                                │         ]}} ──────────────────────────────>│
    │                                │                                            │
+```
+
+### 5.1b Subscribe to Command Activation (High-Level)
+
+Follows the same flow as dataref subscriptions: resolve name → ID, register in `_commandSubscriptions` + `_subscriptionRegistry`, send WS `command_subscribe_is_active`, return `IDisposable` handle.
+
+```
+Consumer                                Library                                      X-Plane
+   │                                       │                                            │
+   │ SubscribeCommandAsync(SimCommand, cb) │                                            │
+   │──────────────────────────────────────>│                                            │
+   │                                       │                                            │
+   │                                       │  ResolveCommandIdAsync("toliss/.../Mast")  │
+   │                                       │  ├─ cache hit? → return id                 │
+   │                                       │  └─ cache miss:                            │
+   │                                       │     GET /api/v3/commands                   │
+   │                                       │       ?filter[name]=toliss/...             │
+   │                                       │       &fields=id,name ────────────────────>│
+   │                                       │     ← { data: [{ id: 200 }] } ─────────────│
+   │                                       │     cache[path] = 200                      │
+   │                                       │                                            │
+   │                                       │  _commandSubscriptions[200] =              │
+   │                                       │     (SimCommand, [cb])                     │
+   │                                       │  _subscriptionRegistry[guid] =             │
+   │                                       │     SubscriptionEntry(200, -1, Command, cb)│
+   │                                       │                                            │
+   │                                       │  WS → { req_id: N,                         │
+   │                                       │     type: "command_subscribe_is_active",   │
+   │                                       │     params: { commands: [                  │
+   │                                       │       { id: 200 }                          │
+   │                                       │     ]}} ──────────────────────────────────>│
+   │                                       │                                            │
+   │  ← IDisposable (SubscriptionHandle)   │                                            │
 ```
 
 ### 5.2 Set Dataref Value (High-Level)
@@ -378,6 +412,10 @@ Consumer                                Library                          X-Plane
   │              │     ├─ ResolveDataRefIdAsync() ──── REST GET ──> X-Plane │
   │              │     └─ SendDataRefSubscribeAsync() ── WS ──────> X-Plane │
   │              │                                                          │
+  │              ├── SubscribeCommandAsync()                                │
+  │              │     ├─ ResolveCommandIdAsync() ──── REST GET ──> X-Plane │
+  │              │     └─ SendCommandSubscribeAsync() ── WS ──────> X-Plane │
+  │              │                                                          │
   │              ├── SetDataRefValueAsync()                                 │
   │              │     ├─ ResolveDataRefIdAsync() ──── REST GET ──> X-Plane │
   │              │     ├─ [WebSocket]  SetDataRefValuesByWsAsync() ─ WS ──> │
@@ -495,10 +533,10 @@ ProcessIncomingMessage(byte[])
    │           └── DispatchStringUpdate(id, base64)
    │               └── Base64 decode → _stringSubscriptions[(id, -1)] → callback
    │
-   ├── type == "command_update_is_active"
-   │   └── HandleCommandUpdates()
-   │       └── For each command ID in data:
-   │           └── _commandSubscriptions[id] → callback(id, bool isActive)
+    ├── type == "command_update_is_active"
+    │   └── HandleCommandUpdates()
+    │       └── For each command ID in data:
+    │           └── _commandSubscriptions[id] → callback(SimCommand, bool isActive)
    │
    └── type == "result"
        └── Deserialize WsResultMessage
@@ -624,9 +662,10 @@ X-Plane's WebSocket API uses numeric session IDs, not string paths. The library 
 │  ├── _commandIdCache           (path → id)                          │
 │  ├── _subscriptions            ((id, index) → callback)             │
 │  ├── _stringSubscriptions      ((id, index) → callback)             │
-│  ├── _subscribedIndices        (id → SortedSet<int>)                │
-│  │   └── SortedSet access is protected by lock(indices)             │
-│  └── _commandSubscriptions     (id → callback)                      │
+  │  ├── _subscribedIndices        (id → SortedSet<int>)                │
+  │  │   └── SortedSet access is protected by lock(indices)             │
+  │  ├── _commandSubscriptions     (id → (SimCommand, callbacks))       │
+  │  └── _subscriptionRegistry     (Guid → SubscriptionEntry)           │
 │                                                                     │
 │  Channel<byte[]> _incomingMessages:                                 │
 │  ├── Bounded(50), DropOldest                                        │
@@ -951,14 +990,17 @@ XPlaneWebConnector
 │   │                                                   // are subscribed per ID
 │   │
 │   ├── _subscriptionRegistry        ConcurrentDictionary<Guid, SubscriptionEntry>
-│   │                                Per-consumer tracking. Each SubscribeAsync call
-│   │                                generates a GUID. SubscriptionEntry contains:
+│   │                                Per-consumer tracking. Each SubscribeAsync /
+│   │                                SubscribeCommandAsync call generates a GUID.
+│   │                                SubscriptionEntry contains:
 │   │                                (DataRefId, Index, Kind, Callback delegate)
+│   │                                Kind: Numeric, String, or Command
 │   │                                Used by HandleUnsubscribeByGuidAsync for
 │   │                                ref-counted unsubscription.
 │   │
-│   └── _commandSubscriptions        ConcurrentDictionary<long, ImmutableArray<Action<long, bool>>>
-│                                    100 → [callback1, callback2]
+│   └── _commandSubscriptions        ConcurrentDictionary<long,
+│                                      (SimCommand, ImmutableArray<Action<SimCommand, bool>>)>
+│                                    100 → (SimCommand, [callback1, callback2])
 │
 ├── Message Pipeline
 │   ├── _dataChannel                Channel<XPlaneDataMessage>(100, DropOldest)
@@ -1053,4 +1095,4 @@ XPlaneWebConnector
 
 ---
 
-*This document reflects the library as of version 1.2.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*
+*This document reflects the library as of version 1.3.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*

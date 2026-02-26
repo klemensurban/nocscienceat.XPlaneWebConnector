@@ -5,10 +5,10 @@ using System.Threading.Channels;
 namespace nocscienceat.XPlaneWebConnector;
 
 /// <summary>
-/// Represents a single consumer's subscription to a dataRef.
+/// Represents a single consumer's subscription to a dataRef or command.
 /// Disposing this handle removes the consumer's callback from the subscription;
-/// when the last consumer for a given dataRef is removed, X-Plane is notified
-/// to stop sending updates.
+/// when the last consumer for a given dataRef/command is removed, X-Plane is
+/// notified to stop sending updates.
 /// </summary>
 public sealed class SubscriptionHandle : IDisposable
 {

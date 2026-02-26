@@ -9,7 +9,8 @@ Provides a high-level interface for subscribing to datarefs, setting dataref val
 ## Features
 
 - **WebSocket dataref subscriptions** — receive real-time value updates with callbacks; returns `IDisposable` for per-consumer unsubscription
-- **Disposable subscription handles** — multiple consumers can subscribe to the same dataref; disposing a handle removes only that consumer's callback; X-Plane is unsubscribed only when the last consumer disposes
+- **WebSocket command activation subscriptions** — subscribe to command activation status updates with the same `IDisposable` pattern as datarefs
+- **Disposable subscription handles** — multiple consumers can subscribe to the same dataref or command; disposing a handle removes only that consumer's callback; X-Plane is unsubscribed only when the last consumer disposes
 - **Dataref writes** — set numeric and string datarefs by path or `SimDataRef` instance
 - **Command execution** — send one-shot commands or control begin/end activation, with optional hold duration
 - **Selectable transport** — choose between WebSocket or HTTP (REST) for commands and dataref writes via `CommandSetDataRefTransport`
@@ -63,7 +64,7 @@ await connector.SubscribeAsync(heading, dataref =>
 await connector.SetDataRefValueAsync("sim/cockpit/lights/landing_lights_on", 1f);
 
 // Send a command
-var cmd = new SimCommand("sim/autopilot/heading_up");
+var cmd = new SimCommand { Command = "sim/autopilot/heading_up" };
 await connector.SendCommandAsync(cmd);
 
 // Keep running...
@@ -81,7 +82,7 @@ The library exposes one public interface, implemented by `XPlaneWebConnector`:
 
 | Interface | Purpose |
 |---|---|
-| `IXPlaneWebConnector` | Subscribe to datarefs, set values, send commands, availability check, connection events |
+| `IXPlaneWebConnector` | Subscribe to datarefs and commands, set values, send commands, availability check, connection events |
 
 > **Note:** `IXPlaneApi` exists as an `internal` interface that documents the full X-Plane REST + WebSocket API surface. It is not intended for external consumption — all public functionality is available through `IXPlaneWebConnector`.
 
@@ -91,9 +92,9 @@ The library exposes one public interface, implemented by `XPlaneWebConnector`:
 |---|---|
 | `SimDataRef` | Numeric dataref reference — holds the path and the latest `float` value |
 | `SimStringDataRef` | String/data-type dataref reference — holds the path and the latest `string` value |
-| `SimCommand` | Command reference — holds the command path and an optional description |
+| `SimCommand` | Command reference — holds the command path |
 | `CommandSetDataRefTransport` | Enum selecting the transport for commands and dataref writes: `WebSocket` (default) or `Http` |
-| `SubscriptionHandle` | `IDisposable` returned by `SubscribeAsync` — disposing removes the consumer's callback and unsubscribes from X-Plane when no consumers remain |
+| `SubscriptionHandle` | `IDisposable` returned by `SubscribeAsync` / `SubscribeCommandAsync` — disposing removes the consumer's callback and unsubscribes from X-Plane when no consumers remain |
 
 ## Usage
 
@@ -247,20 +248,31 @@ await connector.SetDataRefValueAsync("sim/aircraft/view/acf_tailnum", "D-ABCD");
 
 ```csharp
 // One-shot command (press & immediate release, duration = 0)
-var gearToggle = new SimCommand("sim/flight_controls/landing_gear_toggle");
+var gearToggle = new SimCommand { Command = "sim/flight_controls/landing_gear_toggle" };
 await connector.SendCommandAsync(gearToggle);
 
 // Command with a specific hold duration (0–10 seconds)
-var fireTest = new SimCommand("sim/annunciator/fire_test");
+var fireTest = new SimCommand { Command = "sim/annunciator/fire_test" };
 await connector.SendCommandAsync(fireTest, duration: 3.0f);
-
-// With description (for documentation purposes)
-var apDisconnect = new SimCommand(
-    command: "sim/autopilot/disconnect",
-    description: "Disconnects the autopilot"
-);
-await connector.SendCommandAsync(apDisconnect);
 ```
+
+### Subscribing to Command Activation
+
+`SubscribeCommandAsync` follows the same pattern as dataref subscriptions: pass a `SimCommand`, receive an `IDisposable` handle for per-consumer unsubscription.
+
+```csharp
+var engineMaster = new SimCommand { Command = "toliss_airbus/engcommands/Master1On" };
+
+IDisposable sub = await connector.SubscribeCommandAsync(engineMaster, (cmd, isActive) =>
+{
+    Console.WriteLine($"Command {cmd.Command}: active={isActive}");
+});
+
+// Later, to unsubscribe:
+sub.Dispose();
+```
+
+Multiple consumers can subscribe to the same command independently — the same ref-counted unsubscription logic applies as with datarefs.
 
 ### Detecting Connection Loss
 

@@ -59,8 +59,8 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     // to the same dataRef. Used for future per-consumer unsubscription with reference counting.
     private readonly ConcurrentDictionary<Guid, SubscriptionEntry> _subscriptionRegistry = new();
 
-    // Command activation subscriptions: command session ID ? callbacks
-    private readonly ConcurrentDictionary<long, ImmutableArray<Action<long, bool>>> _commandSubscriptions = new();
+    // Command activation subscriptions: command session ID ? (element, callbacks)
+    private readonly ConcurrentDictionary<long, (SimCommand Element, ImmutableArray<Action<SimCommand, bool>> Callbacks)> _commandSubscriptions = new();
 
     // Monotonically increasing request ID for WebSocket messages
     private int _nextReqId;
@@ -264,6 +264,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         _subscriptions.Clear();
         _stringSubscriptions.Clear();
         _subscribedIndices.Clear();
+        _commandSubscriptions.Clear();
         _subscriptionRegistry.Clear();
         _logger.LogInformation("XPlaneWebConnector stopped");
     }
@@ -675,46 +676,49 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     }
 
     // ========================================================================
+    // IXPlaneWebConnector: Subscribe to command activation updates (WebSocket)
+    // ========================================================================
+
+    public async Task<IDisposable> SubscribeCommandAsync(SimCommand command, Action<SimCommand, bool> onUpdate)
+    {
+        var id = await ResolveCommandIdAsync(command.Command);
+        var subId = Guid.NewGuid();
+
+        await _commandChannel.Writer.SendCommandAsync(
+            new WorkerCommand.SubscribeCommand(subId, id, command, onUpdate));
+
+        _logger.LogDebug("Subscribed to command {Name} (id={Id}, subId={SubId})", command.Command, id, subId);
+        return new SubscriptionHandle(subId, _commandChannel.Writer);
+    }
+
+    // ========================================================================
     // IXPlaneApi: WebSocket — Command subscriptions
     // ========================================================================
 
     public async Task SubscribeCommandUpdatesAsync(IEnumerable<long> commandIds, Action<long, bool> onUpdate)
     {
-        var entries = new List<CommandIdEntry>();
         foreach (var id in commandIds)
         {
-            _commandSubscriptions.AddOrUpdate(
-                id,
-                _ => ImmutableArray.Create(onUpdate),
-                (_, existing) => existing.Add(onUpdate));
-            entries.Add(new CommandIdEntry { Id = id });
+            var shim = new SimCommand { Command = _reverseCommandIdCache.GetValueOrDefault(id, $"id:{id}") };
+            var subId = Guid.NewGuid();
+            await _commandChannel.Writer.SendCommandAsync(
+                new WorkerCommand.SubscribeCommand(subId, id, shim, (_, isActive) => onUpdate(id, isActive)));
         }
-
-        var request = new WsRequest<CommandSubscribeParams>
-        {
-            ReqId = Interlocked.Increment(ref _nextReqId),
-            Type = "command_subscribe_is_active",
-            Params = new CommandSubscribeParams { Commands = entries }
-        };
-        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
     }
 
     public async Task UnsubscribeCommandUpdatesAsync(IEnumerable<long> commandIds)
     {
-        var entries = new List<CommandIdEntry>();
         foreach (var id in commandIds)
         {
-            _commandSubscriptions.TryRemove(id, out _);
-            entries.Add(new CommandIdEntry { Id = id });
+            foreach (var kvp in _subscriptionRegistry)
+            {
+                if (kvp.Value.Kind == SubscriptionKind.Command && kvp.Value.DataRefId == id)
+                {
+                    await _commandChannel.Writer.SendCommandAsync(
+                        new WorkerCommand.UnsubscribeByGuid(kvp.Key));
+                }
+            }
         }
-
-        var request = new WsRequest<CommandSubscribeParams>
-        {
-            ReqId = Interlocked.Increment(ref _nextReqId),
-            Type = "command_unsubscribe_is_active",
-            Params = new CommandSubscribeParams { Commands = entries }
-        };
-        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
     }
 
     // ========================================================================

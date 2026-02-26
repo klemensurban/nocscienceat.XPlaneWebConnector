@@ -226,7 +226,7 @@ public sealed partial class XPlaneWebConnector
             if (!long.TryParse(prop.Name, out var id))
                 continue;
 
-            if (!_commandSubscriptions.TryGetValue(id, out var callbacks))
+            if (!_commandSubscriptions.TryGetValue(id, out var sub))
                 continue;
 
             var isActive = prop.Value.ValueKind == JsonValueKind.True;
@@ -234,11 +234,9 @@ public sealed partial class XPlaneWebConnector
             {
                 _logger.LogDebug("Received HandleCommand for Commandpath {Name} (id={Id}):  active={active}", path , id, isActive);
             }
-            foreach (var cb in callbacks)
+            foreach (var cb in sub.Callbacks)
             {
-                //try { cb(id, isActive); }
-                //catch (Exception ex) { _logger.LogWarning(ex, "Error in command callback for id {Id}", id); }
-                _callbacks.Writer.TryWrite(new CallbackItem.CommandCb(cb, id, isActive ));
+                _callbacks.Writer.TryWrite(new CallbackItem.CommandCb(cb, sub.Element, isActive));
             }
         }
     }
@@ -282,6 +280,23 @@ public sealed partial class XPlaneWebConnector
     }
 
     /// <summary>
+    /// Registers a command activation subscription. Returns true if this is a new subscription.
+    /// Called on the Worker thread via <see cref="HandleWorkerCommandAsync"/>.
+    /// </summary>
+    private bool RegisterCommandSubscription(Guid subscriptionId, long id, SimCommand element, Action<SimCommand, bool> callback)
+    {
+        bool added = false;
+        _commandSubscriptions.AddOrUpdate(
+            id,
+            _ => { added = true; return (element, ImmutableArray.Create(callback)); },
+            (_, existing) => (existing.Element, existing.Callbacks.Add(callback)));
+
+        _subscriptionRegistry[subscriptionId] = new SubscriptionEntry(id, -1, SubscriptionKind.Command, callback);
+
+        return added;
+    }
+
+    /// <summary>
     /// Processes Worker commands on the Worker's single thread.
     /// Handles subscription registration and sends WebSocket subscribe messages.
     /// </summary>
@@ -303,23 +318,9 @@ public sealed partial class XPlaneWebConnector
                 await HandleUnsubscribeByGuidAsync(unsub.SubscriptionId);
                 return true;
 
-            case WorkerCommand.SubscribeCommandUpdates sub:
-                var entries = new List<CommandIdEntry>();
-                foreach (var id in sub.CommandIds)
-                {
-                    _commandSubscriptions.AddOrUpdate(
-                        id,
-                        _ => ImmutableArray.Create(sub.OnUpdate),
-                        (_, existing) => existing.Add(sub.OnUpdate));
-                    entries.Add(new CommandIdEntry { Id = id });
-                }
-                var request = new WsRequest<CommandSubscribeParams>
-                {
-                    ReqId = Interlocked.Increment(ref _nextReqId),
-                    Type = "command_subscribe_is_active",
-                    Params = new CommandSubscribeParams { Commands = entries }
-                };
-                await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
+            case WorkerCommand.SubscribeCommand sub:
+                if (RegisterCommandSubscription(sub.SubscriptionId, sub.Id, sub.Element, sub.Callback))
+                    await SendCommandSubscribeAsync(sub.Id);
                 return true;
 
             case WorkerCommand.UnsubscribeAllDataRefs:
@@ -390,35 +391,61 @@ public sealed partial class XPlaneWebConnector
                     }
                 }
                 break;
+
+            case SubscriptionKind.Command:
+                if (_commandSubscriptions.TryGetValue(entry.DataRefId, out var cmdSub))
+                {
+                    var updated = cmdSub.Callbacks.Remove((Action<SimCommand, bool>)entry.Callback);
+                    if (updated.IsEmpty)
+                    {
+                        _commandSubscriptions.TryRemove(entry.DataRefId, out _);
+                        lastConsumer = true;
+                    }
+                    else
+                    {
+                        _commandSubscriptions[entry.DataRefId] = (cmdSub.Element, updated);
+                    }
+                }
+                break;
         }
 
         if (lastConsumer)
         {
-            // Clean up index tracking
-            if (entry.Index >= 0 && _subscribedIndices.TryGetValue(entry.DataRefId, out var indices))
+            if (entry.Kind is SubscriptionKind.Numeric or SubscriptionKind.String)
             {
-                lock (indices)
+                // Clean up index tracking
+                if (entry.Index >= 0 && _subscribedIndices.TryGetValue(entry.DataRefId, out var indices))
                 {
-                    indices.Remove(entry.Index);
-                    if (indices.Count == 0)
-                        _subscribedIndices.TryRemove(entry.DataRefId, out _);
+                    lock (indices)
+                    {
+                        indices.Remove(entry.Index);
+                        if (indices.Count == 0)
+                            _subscribedIndices.TryRemove(entry.DataRefId, out _);
+                    }
                 }
+
+                // Tell X-Plane to stop sending updates for this dataRef
+                await UnsubscribeDataRefsAsync([new DataRefSubscribeEntry
+                {
+                    Id = entry.DataRefId,
+                    Index = entry.Index >= 0 ? JsonSerializer.SerializeToElement(entry.Index) : null
+                }]);
+
+                _logger.LogDebug("Unsubscribed from X-Plane: dataRef id={Id}, index={Index} (last consumer removed)",
+                    entry.DataRefId, entry.Index);
             }
-
-            // Tell X-Plane to stop sending updates for this dataRef
-            await UnsubscribeDataRefsAsync([new DataRefSubscribeEntry
+            else if (entry.Kind == SubscriptionKind.Command)
             {
-                Id = entry.DataRefId,
-                Index = entry.Index >= 0 ? JsonSerializer.SerializeToElement(entry.Index) : null
-            }]);
+                await SendCommandUnsubscribeAsync(entry.DataRefId);
 
-            _logger.LogDebug("Unsubscribed from X-Plane: dataRef id={Id}, index={Index} (last consumer removed)",
-                entry.DataRefId, entry.Index);
+                _logger.LogDebug("Unsubscribed from X-Plane: command id={Id} (last consumer removed)",
+                    entry.DataRefId);
+            }
         }
         else
         {
-            _logger.LogDebug("Removed consumer {SubId} from dataRef id={Id}, index={Index} (other consumers remain)",
-                subscriptionId, entry.DataRefId, entry.Index);
+            _logger.LogDebug("Removed consumer {SubId} from id={Id}, index={Index}, kind={Kind} (other consumers remain)",
+                subscriptionId, entry.DataRefId, entry.Index, entry.Kind);
         }
     }
 
@@ -432,6 +459,30 @@ public sealed partial class XPlaneWebConnector
         }
 
         await SubscribeDataRefsAsync([new DataRefSubscribeEntry { Id = id, Index = index >= 0 ? JsonSerializer.SerializeToElement(index) : null }]);
+    }
+
+    /// <summary>Sends a command_subscribe_is_active WS message for a single command ID.</summary>
+    private async Task SendCommandSubscribeAsync(long id)
+    {
+        var request = new WsRequest<CommandSubscribeParams>
+        {
+            ReqId = Interlocked.Increment(ref _nextReqId),
+            Type = "command_subscribe_is_active",
+            Params = new CommandSubscribeParams { Commands = [new CommandIdEntry { Id = id }] }
+        };
+        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
+    }
+
+    /// <summary>Sends a command_unsubscribe_is_active WS message for a single command ID.</summary>
+    private async Task SendCommandUnsubscribeAsync(long id)
+    {
+        var request = new WsRequest<CommandSubscribeParams>
+        {
+            ReqId = Interlocked.Increment(ref _nextReqId),
+            Type = "command_unsubscribe_is_active",
+            Params = new CommandSubscribeParams { Commands = [new CommandIdEntry { Id = id }] }
+        };
+        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
     }
 
     public async Task SubscribeDataRefsAsync(IEnumerable<DataRefSubscribeEntry> datarefs)
@@ -457,7 +508,11 @@ public sealed partial class XPlaneWebConnector
         _subscriptions.Clear();
         _stringSubscriptions.Clear();
         _subscribedIndices.Clear();
-        _subscriptionRegistry.Clear();
+        foreach (var kvp in _subscriptionRegistry)
+        {
+            if (kvp.Value.Kind is SubscriptionKind.Numeric or SubscriptionKind.String)
+                _subscriptionRegistry.TryRemove(kvp.Key, out _);
+        }
     }
 
     public async Task UnsubscribeAllCommandUpdatesAsync()
@@ -470,5 +525,10 @@ public sealed partial class XPlaneWebConnector
         };
         await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandUnsubscribeAllParams);
         _commandSubscriptions.Clear();
+        foreach (var kvp in _subscriptionRegistry)
+        {
+            if (kvp.Value.Kind == SubscriptionKind.Command)
+                _subscriptionRegistry.TryRemove(kvp.Key, out _);
+        }
     }
 }

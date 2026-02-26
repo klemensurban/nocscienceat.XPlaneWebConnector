@@ -15,8 +15,8 @@ internal abstract record WorkerCommand
     internal sealed record SubscribeString(
         Guid SubscriptionId, long Id, int Index, SimStringDataRef Element, Action<SimStringDataRef> Callback) : WorkerCommand;
 
-    internal sealed record SubscribeCommandUpdates(
-        IEnumerable<long> CommandIds, Action<long, bool> OnUpdate) : WorkerCommand;
+    internal sealed record SubscribeCommand(
+        Guid SubscriptionId, long Id, SimCommand Element, Action<SimCommand, bool> Callback) : WorkerCommand;
 
     internal sealed record UnsubscribeByGuid(Guid SubscriptionId) : WorkerCommand;
 

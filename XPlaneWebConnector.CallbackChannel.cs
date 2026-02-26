@@ -39,7 +39,7 @@ public sealed partial class XPlaneWebConnector
                             cb.Callback(cb.Element);
                             break;
                         case CallbackItem.CommandCb cb:
-                            cb.Callback(cb.Id, cb.IsActive);
+                            cb.Callback(cb.Element, cb.IsActive);
                             break;
                     }
                 }

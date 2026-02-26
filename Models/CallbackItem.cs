@@ -15,8 +15,8 @@ internal abstract record CallbackItem
         ) : CallbackItem; 
 
     internal sealed record CommandCb (
-        Action<long, bool> Callback,
-        long Id,
+        Action<SimCommand, bool> Callback,
+        SimCommand Element,
         bool IsActive
         ) : CallbackItem;
 }

@@ -105,6 +105,12 @@ SubscribeAsync(SimStringDataRef, callback) → IDisposable
   ├─ Guid.NewGuid()                          ── generates subscription ID
   ├─ _commandChannel.Writer.SendCommandAsync ──► Worker.cs
   └─ return new SubscriptionHandle(guid)
+
+SubscribeCommandAsync(SimCommand, callback) → IDisposable
+  ├─ ResolveCommandIdAsync()                 ── HTTP GET /commands  (this file)
+  ├─ Guid.NewGuid()                          ── generates subscription ID
+  ├─ _commandChannel.Writer.SendCommandAsync ──► Worker.cs
+  └─ return new SubscriptionHandle(guid)
 ```
 
 ---
@@ -157,10 +163,13 @@ SetDataRefValuesByWsAsync()
   └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
 
 SubscribeCommandUpdatesAsync()
-  └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
+  └─ for each id: _commandChannel.Writer.SendCommandAsync  ──► Worker.cs
+     (creates shim SimCommand, delegates through SubscribeCommand)
 
 UnsubscribeCommandUpdatesAsync()
-  └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
+  └─ for each id: scans _subscriptionRegistry for Command entries
+     └─ _commandChannel.Writer.SendCommandAsync  ──► Worker.cs
+        (sends UnsubscribeByGuid for matching entries)
 
 SetCommandActiveAsync()
   └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
@@ -195,5 +204,5 @@ BuildQueryUrl()                              ── pure function, query string 
 | **Transport.cs** | `SendWebSocketFireAndForgetAsync` | any WS send method |
 | **CallbackChannel.cs** | `StartCallbacksAsync` | `Start()` |
 | **Worker.cs** | `DataRefWorkerHandler` (ctor) | `Start()` |
-| **Worker.cs** | `HandleWorkerCommandAsync` | via command channel from `SubscribeAsync` |
+| **Worker.cs** | `HandleWorkerCommandAsync` | via command channel from `SubscribeAsync`, `SubscribeCommandAsync` |
 | **Utility.cs** | `ParseDataRefPath` | `SubscribeAsync`, `SetDataRefValueAsync` |

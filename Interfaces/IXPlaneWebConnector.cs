@@ -79,5 +79,16 @@ public interface IXPlaneWebConnector : IDisposable
     /// a single active+release; a non-zero duration is passed to command_set_is_active.
     /// </summary>
     Task SendCommandAsync(SimCommand command, float duration);
+
+    // ========================================================================
+    // Command activation subscriptions
+    // ========================================================================
+
+    /// <summary>
+    /// Subscribes to command activation status updates.
+    /// Dispose the returned handle to unsubscribe this consumer;
+    /// X-Plane is unsubscribed only when the last consumer disposes.
+    /// </summary>
+    Task<IDisposable> SubscribeCommandAsync(SimCommand command, Action<SimCommand, bool> onUpdate);
 }
 

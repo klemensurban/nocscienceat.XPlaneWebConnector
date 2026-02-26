@@ -43,7 +43,7 @@ before data reaches the consumer. It reads `_callbacks` and invokes user code.
   CallbackChannel.cs:  ProcessCallbackChannelAsync
        │               switch on CallbackItem type
        ▼
-  Consumer callback:   Action<SimDataRef>, Action<SimStringDataRef>, Action<long,bool>
+   Consumer callback:   Action<SimDataRef>, Action<SimStringDataRef>, Action<SimCommand,bool>
        │
        ▼
   Panel / application code (e.g. serial port write, UI update)
@@ -72,8 +72,8 @@ StartCallbacksAsync(ct)                              ── called from Start() 
               ├─ CallbackItem.SimStringDataRefCb
               │    └─ cb.Callback(cb.Element)          ── user callback
               │
-              └─ CallbackItem.CommandCb
-                   └─ cb.Callback(cb.Id, cb.IsActive)  ── user callback
+               └─ CallbackItem.CommandCb
+                    └─ cb.Callback(cb.Element, cb.IsActive)  ── user callback
 ```
 
 ---

@@ -38,14 +38,4 @@ public sealed class SimCommand
     /// <summary>X-Plane command path (e.g. "sim/autopilot/heading_up").</summary>
     public string Command { get; init; } = "";
 
-    /// <summary>Optional human-readable description.</summary>
-    public string Description { get; init; } = "";
-
-    public SimCommand() { }
-
-    public SimCommand(string command, string description = "")
-    {
-        Command = command;
-        Description = description;
-    }
 }
