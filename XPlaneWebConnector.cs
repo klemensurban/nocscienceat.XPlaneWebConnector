@@ -104,6 +104,22 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         _fireForgetOnHttpTransport = fireForgetOnHttpTransport;
     }
 
+    /// <summary>
+    /// DI-friendly constructor. Resolves settings from <see cref="IXPlaneWebConnectorSettings"/>.
+    /// <para>Register in DI with:</para>
+    /// <code>
+    /// services.AddSingleton&lt;IXPlaneWebConnectorSettings&gt;(mySettings);
+    /// services.AddSingleton&lt;IXPlaneWebConnector, XPlaneWebConnector&gt;();
+    /// </code>
+    /// </summary>
+    public XPlaneWebConnector(IXPlaneWebConnectorSettings settings, ILogger<XPlaneWebConnector> logger, IHttpClientFactory httpClientFactory)
+        : this(settings.Host, settings.Port,
+               Enum.TryParse<CommandSetDataRefTransport>(settings.Transport, ignoreCase: true, out var parsed) ? parsed : CommandSetDataRefTransport.WebSocket,
+               settings.FireForgetOnHttpTransport, logger, httpClientFactory,
+               settings.ReadinessProbeDataRef, settings.ReadinessProbeMaxRetries, settings.ApiVersion)
+    {
+    }
+
     // ========================================================================
     // Lifecycle
     // ========================================================================

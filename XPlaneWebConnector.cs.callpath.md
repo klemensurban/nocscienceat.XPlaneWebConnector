@@ -53,6 +53,10 @@ XPlaneWebConnector(host, port, ...)
   └─ initializes channels: _dataChannel, _commandChannel, _callbacks
   └─ initializes caches:   _dataRefIdCache, _reverseDataRefIdCache, _commandIdCache, _reverseCommandIdCache
   └─ initializes subs:     _subscriptions, _stringSubscriptions, _subscribedIndices, _subscriptionRegistry, _commandSubscriptions
+
+XPlaneWebConnector(IXPlaneWebConnectorSettings, ILogger, IHttpClientFactory)
+  └─ DI-friendly constructor — delegates to the raw-parameter constructor above
+  └─ parses Transport string → CommandSetDataRefTransport enum (defaults to WebSocket)
 ```
 
 ---

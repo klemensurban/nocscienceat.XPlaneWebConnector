@@ -94,6 +94,7 @@ The library exposes one public interface, implemented by `XPlaneWebConnector`:
 | `SimStringDataRef` | String/data-type dataref reference — holds the path and the latest `string` value |
 | `SimCommand` | Command reference — holds the command path |
 | `CommandSetDataRefTransport` | Enum selecting the transport for commands and dataref writes: `WebSocket` (default) or `Http` |
+| `IXPlaneWebConnectorSettings` | Interface for connector configuration — implement in consumer projects to enable clean DI registration |
 | `SubscriptionHandle` | `IDisposable` returned by `SubscribeAsync` / `SubscribeCommandAsync` — disposing removes the consumer's callback and unsubscribes from X-Plane when no consumers remain |
 
 ## Usage
@@ -290,23 +291,47 @@ The `IXPlaneApi` interface is `internal` and documents the full X-Plane REST + W
 
 ## Dependency Injection
 
-Register the connector in a DI container (e.g. with `Microsoft.Extensions.Hosting`):
+The recommended way to register the connector is via `IXPlaneWebConnectorSettings`. Implement the interface in your settings class (mapping your property names as needed) and let the DI container resolve the constructor automatically:
 
 ```csharp
-builder.Services.AddSingleton<XPlaneWebConnector>(sp =>
+// Your settings class implements IXPlaneWebConnectorSettings
+public class MySettings : IXPlaneWebConnectorSettings
+{
+    public string Host { get; set; } = "localhost";
+    public int Port { get; set; } = 8086;
+    public string Transport { get; set; } = "WebSocket";
+    public bool FireForgetOnHttpTransport { get; set; } = true;
+    public string ApiVersion { get; set; } = "v2";
+    public string? ReadinessProbeDataRef { get; set; }
+    public int ReadinessProbeMaxRetries { get; set; } = 0;
+}
+```
+
+Registration:
+
+```csharp
+var mySettings = config.GetSection("XPlane").Get<MySettings>() ?? new MySettings();
+
+builder.Services.AddSingleton<IXPlaneWebConnectorSettings>(mySettings);
+builder.Services.AddSingleton<IXPlaneWebConnector, XPlaneWebConnector>();
+```
+
+The DI container resolves `IXPlaneWebConnectorSettings`, `ILogger<XPlaneWebConnector>`, and `IHttpClientFactory` automatically.
+
+Alternatively, use the raw-parameter constructor with a factory lambda:
+
+```csharp
+builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
     new XPlaneWebConnector(
         "localhost", 8086,
         CommandSetDataRefTransport.Http,      // or WebSocket
-        fireForgetOnHttpTransport: true,      // fire-and-forget HTTP writes
+        fireForgetOnHttpTransport: true,
         sp.GetRequiredService<ILogger<XPlaneWebConnector>>(),
         sp.GetRequiredService<IHttpClientFactory>(),
         readinessProbeDataRef: "AirbusFBW/EnableExternalPower",
         readinessProbeMaxRetries: 30,
-        apiVersion: "v2"                      // "v2" for X-Plane 12.3, "v3" for 12.4+
+        apiVersion: "v2"
     ));
-
-builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
-sp.GetRequiredService<XPlaneWebConnector>());
 ```
 
 ## Architecture
