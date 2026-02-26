@@ -365,7 +365,7 @@ sp.GetRequiredService<XPlaneWebConnector>());
 |---|---|
 | [dataflow.md](dataflow.md) | Detailed internal data flow, threading model, and protocol interactions |
 | [ApiSpecifications.md](ApiSpecifications.md) | X-Plane Web API specification reference |
-| [XPlaneWebConnector.cs.callpath.md](XPlaneWebConnector.cs.callpath.md) | Call path diagram for the main partial class (public API, REST, lifecycle) |
+| [XPlaneWebConnector.cs.callpath.md](XPlaneWebConnector.cs.callpath.md) | Call path diagram for the main partial class (lifecycle, subscribe, set, send, ID resolution) |
 | [XPlaneWebConnector.Worker.cs.callpath.md](XPlaneWebConnector.Worker.cs.callpath.md) | Call path diagram for the Worker (subscription state, inbound dispatch) |
 | [XPlaneWebConnector.Transport.cs.callpath.md](XPlaneWebConnector.Transport.cs.callpath.md) | Call path diagram for WebSocket transport (receive loop, send helper) |
 | [XPlaneWebConnector.CallbackChannel.cs.callpath.md](XPlaneWebConnector.CallbackChannel.cs.callpath.md) | Call path diagram for the callback channel (final dispatch to consumers) |

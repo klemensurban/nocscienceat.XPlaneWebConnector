@@ -105,106 +105,6 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     }
 
     // ========================================================================
-    // Availability check (IXPlaneAvailabilityCheck)
-    // ========================================================================
-
-    public async Task<bool> IsAvailableAsync(CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            using var response = await _httpClientFactory.CreateClient().GetAsync(_capabilitiesUrl, cancellationToken);
-            if (!response.IsSuccessStatusCode)
-                return false;
-
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            var caps = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneCapabilitiesResponse, cancellationToken);
-            return caps?.Api?.Versions is { Count: > 0 };
-        }
-        catch (HttpRequestException)
-        {
-            return false;
-        }
-        catch (TaskCanceledException)
-        {
-            return false;
-        }
-    }
-
-    public async Task WaitUntilAvailableAsync(TimeSpan? pollInterval = null, CancellationToken cancellationToken = default)
-    {
-        var interval = pollInterval ?? TimeSpan.FromSeconds(3);
-
-        // Phase 1: Wait for X-Plane web server to respond
-        _logger.LogInformation("Waiting for X-Plane API at {Url} ...", _capabilitiesUrl);
-
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            if (await IsAvailableAsync(cancellationToken))
-            {
-                _logger.LogInformation("X-Plane API is available");
-                break;
-            }
-
-            _logger.LogDebug("X-Plane API not yet available, retrying in {Interval}s ...", interval.TotalSeconds);
-            await Task.Delay(interval, cancellationToken);
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-
-        // Phase 2: Wait for aircraft plugin datarefs to be registered (if configured)
-        if (string.IsNullOrEmpty(_readinessProbeDataRef))
-            return;
-
-        _logger.LogInformation("Waiting for plugin dataRef '{DataRefPath}' to become available ...", _readinessProbeDataRef);
-
-        var probeUrl = $"{_baseUrl}/datarefs?filter[name]={Uri.EscapeDataString(_readinessProbeDataRef)}&fields=id";
-        int attempt = 0;
-
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            attempt++;
-
-            try
-            {
-                using var response = await _httpClientFactory.CreateClient().GetAsync(probeUrl, cancellationToken);
-
-                if (response.IsSuccessStatusCode)
-                {
-                    await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                    var result = await JsonSerializer.DeserializeAsync(
-                        stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo, cancellationToken);
-
-                    if (result?.Data is { Count: > 0 })
-                    {
-                        _logger.LogInformation("Plugin dataRef '{DataRefPath}' is available (after {Attempts} attempt(s))",
-                            _readinessProbeDataRef, attempt);
-                        return;
-                    }
-                }
-            }
-            catch (HttpRequestException) { /* server may have restarted during aircraft load */ }
-            catch (TaskCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
-            catch (TaskCanceledException) { /* timeout */ }
-
-            if (_readinessProbeMaxRetries > 0 && attempt >= _readinessProbeMaxRetries)
-            {
-                _logger.LogWarning("Plugin dataRef '{DataRefPath}' not available after {Max} retries, continuing anyway",
-                    _readinessProbeDataRef, _readinessProbeMaxRetries);
-                return;
-            }
-
-            _logger.LogDebug("Plugin dataRef '{DataRefPath}' not yet available (attempt {Attempt}{MaxInfo}), retrying in {Interval}s ...",
-                _readinessProbeDataRef, attempt,
-                _readinessProbeMaxRetries > 0 ? $"/{_readinessProbeMaxRetries}" : "",
-                interval.TotalSeconds);
-            await Task.Delay(interval, cancellationToken);
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-    }
-
-
-    // ========================================================================
     // Lifecycle
     // ========================================================================
 
@@ -439,55 +339,11 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         return id;
     }
 
-    // ========================================================================
-    // IXPlaneApi: REST — Capabilities
-    // ========================================================================
 
-    public async Task<XPlaneCapabilitiesResponse?> GetCapabilitiesAsync(CancellationToken ct = default)
-    {
-        using var response = await _httpClientFactory.CreateClient().GetAsync(_capabilitiesUrl, ct);
-        response.EnsureSuccessStatusCode();
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        return await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneCapabilitiesResponse, ct);
-    }
 
     // ========================================================================
-    // IXPlaneApi: REST — Datarefs
+    // IXPlaneApi: Dataref writes (used by SetDataRefValueAsync)
     // ========================================================================
-
-    public async Task<List<XPlaneDataRefInfo>> ListDataRefsAsync(
-        IEnumerable<string>? filterNames = null,
-        int? start = null,
-        int? limit = null,
-        string? fields = null,
-        CancellationToken ct = default)
-    {
-        var url = BuildQueryUrl($"{_baseUrl}/datarefs", filterNames, start, limit, fields);
-        using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
-        response.EnsureSuccessStatusCode();
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo, ct);
-        return result?.Data ?? [];
-    }
-
-    public async Task<int> GetDataRefCountAsync(CancellationToken ct = default)
-    {
-        using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/datarefs/count", ct);
-        response.EnsureSuccessStatusCode();
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
-        return result?.Data ?? 0;
-    }
-
-    public async Task<JsonElement> GetDataRefValueAsync(long id, int? index = null, CancellationToken ct = default)
-    {
-        var indexParam = index.HasValue ? $"?index={index.Value}" : "";
-        using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/datarefs/{id}/value{indexParam}", ct);
-        response.EnsureSuccessStatusCode();
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneValueResponse, ct);
-        return result?.Data ?? default;
-    }
 
     public async Task SetDataRefValueByIdAsync(long id, JsonElement value, int? index = null, CancellationToken ct = default)
     {
@@ -550,33 +406,11 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
     }
 
-    // ========================================================================
-    // IXPlaneApi: REST — Commands
-    // ========================================================================
 
-    public async Task<List<XPlaneCommandInfo>> ListCommandsAsync(
-        IEnumerable<string>? filterNames = null,
-        int? start = null,
-        int? limit = null,
-        string? fields = null,
-        CancellationToken ct = default)
-    {
-        var url = BuildQueryUrl($"{_baseUrl}/commands", filterNames, start, limit, fields);
-        using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
-        response.EnsureSuccessStatusCode();
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneCommandInfo, ct);
-        return result?.Data ?? [];
-    }
 
-    public async Task<int> GetCommandCountAsync(CancellationToken ct = default)
-    {
-        using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/commands/count", ct);
-        response.EnsureSuccessStatusCode();
-        await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
-        return result?.Data ?? 0;
-    }
+    // ========================================================================
+    // IXPlaneApi: Command activation (used by SendCommandAsync)
+    // ========================================================================
 
     public async Task ActivateCommandAsync(long id, float duration = 0, CancellationToken ct = default)
     {
@@ -609,71 +443,6 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         Task<HttpResponseMessage> SendAsync() => _httpClientFactory.CreateClient().PostAsync($"{_baseUrl}/command/{id}/activate", content);
     }
 
-    // ========================================================================
-    // IXPlaneApi: REST — Flight
-    // ========================================================================
-
-    public async Task StartFlightAsync(JsonElement flightData, CancellationToken ct = default)
-    {
-        var body = new FlightBody { Data = flightData };
-        var json = JsonSerializer.SerializeToUtf8Bytes(body, Models.XPlaneJsonContext.Default.FlightBody);
-        var content = new ByteArrayContent(json);
-        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-
-        if (_fireForgetOnHttpTransport)
-        {
-            _ = FireAndForgetAsync();
-            return;
-
-            async Task FireAndForgetAsync()
-            {
-                try
-                {
-                    using var response = await SendAsync();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed StartFlightAsync");
-                }
-            }
-        }
-
-        using var response = await SendAsync();
-        response.EnsureSuccessStatusCode();
-
-        Task<HttpResponseMessage> SendAsync() => _httpClientFactory.CreateClient().PostAsync($"{_baseUrl}/flight", content, ct);
-    }
-
-    public async Task UpdateFlightAsync(JsonElement flightData, CancellationToken ct = default)
-    {
-        var body = new FlightBody { Data = flightData };
-        var json = JsonSerializer.SerializeToUtf8Bytes(body, Models.XPlaneJsonContext.Default.FlightBody);
-        var content = new ByteArrayContent(json);
-        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-
-        if (_fireForgetOnHttpTransport)
-        {
-            _ = FireAndForgetAsync();
-            return;
-
-            async Task FireAndForgetAsync()
-            {
-                try
-                {
-                    using var response = await SendAsync();
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Failed UpdateFlightAsync");
-                }
-            }
-        }
-
-        using var response = await SendAsync();
-        response.EnsureSuccessStatusCode();
-
-        Task<HttpResponseMessage> SendAsync() => _httpClientFactory.CreateClient().PatchAsync($"{_baseUrl}/flight", content, ct);
-    }
 
     // ========================================================================
     // IXPlaneWebConnector: Subscribe to command activation updates (WebSocket)
@@ -739,24 +508,6 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestCommandSetActiveParams);
     }
 
-    // ========================================================================
-    // REST query URL builder
-    // ========================================================================
-
-    private static string BuildQueryUrl(string baseUrl, IEnumerable<string>? filterNames, int? start, int? limit, string? fields)
-    {
-        var parts = new List<string>();
-        if (filterNames is not null)
-        {
-            foreach (var name in filterNames)
-                parts.Add($"filter[name]={Uri.EscapeDataString(name)}");
-        }
-        if (start.HasValue) parts.Add($"start={start.Value}");
-        if (limit.HasValue) parts.Add($"limit={limit.Value}");
-        if (!string.IsNullOrEmpty(fields)) parts.Add($"fields={Uri.EscapeDataString(fields)}");
-
-        return parts.Count > 0 ? $"{baseUrl}?{string.Join('&', parts)}" : baseUrl;
-    }
 
     // ========================================================================
     // IDisposable

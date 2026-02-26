@@ -1,7 +1,7 @@
 ﻿# XPlaneWebConnector.cs — Call Path Diagram
 
 > **Partial class file:** `XPlaneWebConnector.cs`
-> **Responsibility:** Fields, constructor, lifecycle, public API surface, REST/HTTP operations, ID resolution.
+> **Responsibility:** Fields, constructor, lifecycle, high-level public API surface (subscribe, set, send), ID resolution, IDisposable.
 > **Thread context:** Caller thread (any thread — typically the DI / hosted-service thread).
 
 ---
@@ -53,17 +53,6 @@ XPlaneWebConnector(host, port, ...)
   └─ initializes channels: _dataChannel, _commandChannel, _callbacks
   └─ initializes caches:   _dataRefIdCache, _reverseDataRefIdCache, _commandIdCache, _reverseCommandIdCache
   └─ initializes subs:     _subscriptions, _stringSubscriptions, _subscribedIndices, _subscriptionRegistry, _commandSubscriptions
-```
-
----
-
-## Availability Check (IXPlaneWebConnector)
-
-```
-IsAvailableAsync()                           ── HTTP GET /api/capabilities
-WaitUntilAvailableAsync()
-  ├─ Phase 1: polls IsAvailableAsync()       ── waits for X-Plane web server
-  └─ Phase 2: polls REST /datarefs           ── waits for plugin dataRef readiness
 ```
 
 ---
@@ -139,20 +128,17 @@ SendCommandAsync(SimCommand)
 
 ---
 
-## REST API Methods (IXPlaneApi)
+## IXPlaneApi Methods (this file — used by high-level API)
 
 ```
-GetCapabilitiesAsync()                       ── HTTP GET  /api/capabilities
-ListDataRefsAsync()                          ── HTTP GET  /datarefs
-GetDataRefCountAsync()                       ── HTTP GET  /datarefs/count
-GetDataRefValueAsync()                       ── HTTP GET  /datarefs/{id}/value
 SetDataRefValueByIdAsync()                   ── HTTP PATCH /datarefs/{id}/value
-ListCommandsAsync()                          ── HTTP GET  /commands
-GetCommandCountAsync()                       ── HTTP GET  /commands/count
 ActivateCommandAsync()                       ── HTTP POST /command/{id}/activate
-StartFlightAsync()                           ── HTTP POST /flight
-UpdateFlightAsync()                          ── HTTP PATCH /flight
 ```
+
+> Standalone REST methods (`GetCapabilitiesAsync`, `ListDataRefsAsync`,
+> `GetDataRefCountAsync`, `GetDataRefValueAsync`, `ListCommandsAsync`,
+> `GetCommandCountAsync`, `StartFlightAsync`, `UpdateFlightAsync`,
+> `BuildQueryUrl`) are in **Api.cs**.
 
 ---
 
@@ -188,14 +174,6 @@ ResolveCommandIdAsync(path)                  ── HTTP GET /commands, caches i
 
 ---
 
-## Utility (static, this file)
-
-```
-BuildQueryUrl()                              ── pure function, query string builder
-```
-
----
-
 ## Cross-File Transitions (outbound)
 
 | Target File | Method Called | Trigger |
@@ -206,3 +184,10 @@ BuildQueryUrl()                              ── pure function, query string 
 | **Worker.cs** | `DataRefWorkerHandler` (ctor) | `Start()` |
 | **Worker.cs** | `HandleWorkerCommandAsync` | via command channel from `SubscribeAsync`, `SubscribeCommandAsync` |
 | **Utility.cs** | `ParseDataRefPath` | `SubscribeAsync`, `SetDataRefValueAsync` |
+
+### Sibling partial class files (no direct calls, shared state)
+
+| File | Responsibility |
+|---|---|
+| **Availability.cs** | `IsAvailableAsync`, `WaitUntilAvailableAsync` |
+| **Api.cs** | Standalone REST queries (capabilities, datarefs, commands, flight), `BuildQueryUrl` |
