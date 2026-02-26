@@ -2,15 +2,22 @@ namespace nocscienceat.XPlaneWebConnector;
 
 /// <summary>
 /// Configuration settings for <see cref="XPlaneWebConnector"/>.
-/// Bind from <c>IConfiguration</c> section (default key: <c>"XPlaneWebConnector"</c>).
+/// Bind from any <c>IConfiguration</c> section. Supports both <c>Host</c>/<c>Port</c>
+/// and <c>IpAddress</c>/<c>WebPort</c> as property names for flexible config binding.
 /// </summary>
 public class XPlaneWebConnectorSettings : IXPlaneWebConnectorSettings
 {
     /// <summary>X-Plane host address. Default: <c>"127.0.0.1"</c>.</summary>
     public string Host { get; set; } = "127.0.0.1";
 
+    /// <summary>Alias for <see cref="Host"/> — enables binding from config sections that use <c>"IpAddress"</c>.</summary>
+    public string IpAddress { get => Host; set => Host = value; }
+
     /// <summary>X-Plane REST/WebSocket API port. Default: <c>8086</c>.</summary>
     public int Port { get; set; } = 8086;
+
+    /// <summary>Alias for <see cref="Port"/> — enables binding from config sections that use <c>"WebPort"</c>.</summary>
+    public int WebPort { get => Port; set => Port = value; }
 
     /// <summary>
     /// Transport for outbound commands and dataref writes: <c>"WebSocket"</c> or <c>"Http"</c>.

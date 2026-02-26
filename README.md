@@ -94,7 +94,8 @@ The library exposes one public interface, implemented by `XPlaneWebConnector`:
 | `SimStringDataRef` | String/data-type dataref reference — holds the path and the latest `string` value |
 | `SimCommand` | Command reference — holds the command path |
 | `CommandSetDataRefTransport` | Enum selecting the transport for commands and dataref writes: `WebSocket` (default) or `Http` |
-| `IXPlaneWebConnectorSettings` | Interface for connector configuration — implement in consumer projects to enable clean DI registration |
+| `IXPlaneWebConnectorSettings` | Interface for connector configuration — used with DI registration via `XPlaneWebConnectorSettings` |
+| `XPlaneWebConnectorSettings` | Bindable settings class with property aliases (`IpAddress`/`WebPort`) for flexible config binding |
 | `SubscriptionHandle` | `IDisposable` returned by `SubscribeAsync` / `SubscribeCommandAsync` — disposing removes the consumer's callback and unsubscribes from X-Plane when no consumers remain |
 
 ## Usage
@@ -291,28 +292,29 @@ The `IXPlaneApi` interface is `internal` and documents the full X-Plane REST + W
 
 ## Dependency Injection
 
-The recommended way to register the connector is via `IXPlaneWebConnectorSettings`. Implement the interface in your settings class (mapping your property names as needed) and let the DI container resolve the constructor automatically:
+The recommended way to register the connector is via `IXPlaneWebConnectorSettings`. The library provides `XPlaneWebConnectorSettings` which can bind directly from any `IConfiguration` section. It supports property aliases (`IpAddress` → `Host`, `WebPort` → `Port`) so it can share a config section with consumer-specific settings — each class picks up what it needs and ignores the rest.
 
-```csharp
-// Your settings class implements IXPlaneWebConnectorSettings
-public class MySettings : IXPlaneWebConnectorSettings
+```json
 {
-    public string Host { get; set; } = "localhost";
-    public int Port { get; set; } = 8086;
-    public string Transport { get; set; } = "WebSocket";
-    public bool FireForgetOnHttpTransport { get; set; } = true;
-    public string ApiVersion { get; set; } = "v2";
-    public string? ReadinessProbeDataRef { get; set; }
-    public int ReadinessProbeMaxRetries { get; set; } = 0;
+  "XPlane": {
+    "IpAddress": "127.0.0.1",
+    "WebPort": 8086,
+    "Transport": "Http",
+    "FireForgetOnHttpTransport": true,
+    "ApiVersion": "v2",
+    "ReadinessProbeDataRef": "AirbusFBW/BatVolts",
+    "ReadinessProbeMaxRetries": 0
+  }
 }
 ```
 
 Registration:
 
 ```csharp
-var mySettings = config.GetSection("XPlane").Get<MySettings>() ?? new MySettings();
+var settings = builder.Configuration.GetSection("XPlane").Get<XPlaneWebConnectorSettings>()
+    ?? new XPlaneWebConnectorSettings();
 
-builder.Services.AddSingleton<IXPlaneWebConnectorSettings>(mySettings);
+builder.Services.AddSingleton<IXPlaneWebConnectorSettings>(settings);
 builder.Services.AddSingleton<IXPlaneWebConnector, XPlaneWebConnector>();
 ```
 
