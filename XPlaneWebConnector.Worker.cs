@@ -467,17 +467,6 @@ public sealed partial class XPlaneWebConnector
     /// <summary>Sends a command_unsubscribe_is_active WS message for a single command ID.</summary>
     private Task SendCommandUnsubscribeAsync(long id) => UnsubscribeCommandUpdatesAsync([id]);
 
-    public async Task SubscribeDataRefsAsync(IEnumerable<DataRefSubscribeEntry> datarefs)
-    {
-        var request = new WsRequest<DataRefSubscribeParams>
-        {
-            ReqId = Interlocked.Increment(ref _nextReqId),
-            Type = "dataref_subscribe_values",
-            Params = new DataRefSubscribeParams { Datarefs = [.. datarefs] }
-        };
-        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
-    }
-
     public async Task UnsubscribeAllDataRefsAsync()
     {
         var request = new WsRequest<DataRefUnsubscribeAllParams>
