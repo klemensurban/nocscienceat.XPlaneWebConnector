@@ -654,12 +654,16 @@ X-Plane's WebSocket API uses numeric session IDs, not string paths. The library 
 │                                                                     │
 │  Consumer thread(s): Any thread calling the API                     │
 │  ├── SubscribeAsync, SetDataRefValueAsync, SendCommandAsync         │
-│  ├── These acquire no locks (ConcurrentDictionary is lock-free)     │
+│  ├── ID caches use ConcurrentDictionary (cross-thread access)       │
 │  └── WebSocket sends are serialized by the runtime                  │
 │                                                                     │
-│  Shared state (all ConcurrentDictionary, thread-safe):              │
+│  Shared state (ConcurrentDictionary, cross-thread):                 │
 │  ├── _dataRefIdCache           (path → id)                          │
+│  ├── _reverseDataRefIdCache    (id → path)                          │
 │  ├── _commandIdCache           (path → id)                          │
+│  └── _reverseCommandIdCache    (id → path)                          │
+│                                                                     │
+│  Worker-thread-only state (no cross-thread access):                 │
 │  ├── _subscriptions            ((id, index) → callback)             │
 │  ├── _stringSubscriptions      ((id, index) → callback)             │
   │  ├── _subscribedIndices        (id → SortedSet<int>)                │
@@ -970,13 +974,15 @@ XPlaneWebConnector
 │   ├── _cts                         CancellationTokenSource?  Lifecycle control
 │   └── _receiveTask                 Task?                Background WS receive
 │
-├── Caches (populated lazily, cleared on StopAsync)
+├── Caches (populated lazily, cleared on StopAsync — ConcurrentDictionary, cross-thread)
 │   ├── _dataRefIdCache              ConcurrentDictionary<string, long>
-│   │                                "sim/.../heading" → 42
-│   └── _commandIdCache              ConcurrentDictionary<string, long>
-│                                    "sim/autopilot/heading_up" → 100
+│                                    "sim/.../heading" → 42
+│   ├── _reverseDataRefIdCache       ConcurrentDictionary<long, string>
+│   ├── _commandIdCache              ConcurrentDictionary<string, long>
+│   │                                "sim/autopilot/heading_up" → 100
+│   └── _reverseCommandIdCache       ConcurrentDictionary<long, string>
 │
-├── Subscriptions (populated by SubscribeAsync, cleared on StopAsync)
+├── Subscriptions (Worker-thread-only — accessed exclusively by Worker + StopAsync after Worker stops)
 │   ├── _subscriptions               ConcurrentDictionary<(long Id, int Index),
 │   │                                  (SimDataRef, ImmutableArray<Action<SimDataRef>>)>
 │   │                                (42, -1) → (element, [cb1, cb2])  // scalar, multi-consumer

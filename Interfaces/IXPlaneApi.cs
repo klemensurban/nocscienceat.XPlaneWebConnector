@@ -94,10 +94,10 @@ internal interface IXPlaneApi
     // Kept here to document the full X-Plane API surface.
     // ========================================================================
 
-    /// <summary>Subscribes to command activation status updates.</summary>
-    Task SubscribeCommandUpdatesAsync(IEnumerable<long> commandIds, Action<long, bool> onUpdate);
+    /// <summary>Subscribes to command activation status updates via WebSocket.</summary>
+    Task SubscribeCommandUpdatesAsync(IEnumerable<long> commandIds);
 
-    /// <summary>Unsubscribes from one or more command activation updates.</summary>
+    /// <summary>Unsubscribes from one or more command activation updates via WebSocket.</summary>
     Task UnsubscribeCommandUpdatesAsync(IEnumerable<long> commandIds);
 
     /// <summary>Unsubscribes from all command activation updates.</summary>

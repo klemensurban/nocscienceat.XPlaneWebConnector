@@ -152,20 +152,20 @@ ActivateCommandAsync()                       ── HTTP POST /command/{id}/acti
 SetDataRefValuesByWsAsync()
   └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
 
-SubscribeCommandUpdatesAsync()
-  └─ for each id: _commandChannel.Writer.SendCommandAsync  ──► Worker.cs
-     (creates shim SimCommand, delegates through SubscribeCommand)
+UnsubscribeDataRefsAsync()
+  └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
 
-UnsubscribeCommandUpdatesAsync()
-  └─ for each id: scans _subscriptionRegistry for Command entries
-     └─ _commandChannel.Writer.SendCommandAsync  ──► Worker.cs
-        (sends UnsubscribeByGuid for matching entries)
+SubscribeCommandUpdatesAsync(commandIds)
+  └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
+     (pure WS send: command_subscribe_is_active)
+
+UnsubscribeCommandUpdatesAsync(commandIds)
+  └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
+     (pure WS send: command_unsubscribe_is_active)
 
 SetCommandActiveAsync()
   └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
 ```
-
-Note: `UnsubscribeDataRefsAsync` is now in Worker.cs (called internally by `HandleUnsubscribeByGuidAsync`).
 
 ---
 

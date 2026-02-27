@@ -38,7 +38,7 @@ public sealed partial class XPlaneWebConnector
         using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo, ct);
+        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo, ct);
         return result?.Data ?? [];
     }
 

@@ -123,7 +123,8 @@ HandleWorkerCommandAsync(WorkerCommand, ct)
 │    ├─ RegisterCommandSubscription(guid, id, element, callback)
 │    │    └─ _subscriptionRegistry[guid] = new SubscriptionEntry(..., Command)
 │    └─ SendCommandSubscribeAsync(id)
-│         └─ SendWebSocketFireAndForgetAsync()                   ──► Transport.cs
+│         └─ SubscribeCommandUpdatesAsync([id])           ──► XPlaneWebConnector.cs
+│              └─ SendWebSocketFireAndForgetAsync()        ──► Transport.cs
 │
 ├─ UnsubscribeByGuid
 │    └─ HandleUnsubscribeByGuidAsync(guid)
@@ -132,7 +133,8 @@ HandleWorkerCommandAsync(WorkerCommand, ct)
 │         └─ if last consumer:
 │              ├─ Numeric/String: clean up _subscribedIndices
 │              │    └─ UnsubscribeDataRefsAsync()                  ──► Transport.cs
-│              └─ Command: SendCommandUnsubscribeAsync()          ──► Transport.cs
+│              └─ Command: SendCommandUnsubscribeAsync()          ──► XPlaneWebConnector.cs
+│                   └─ UnsubscribeCommandUpdatesAsync([id])       ──► Transport.cs
 │
 ├─ UnsubscribeAllDataRefs
 │    └─ UnsubscribeAllDataRefsAsync()
@@ -166,8 +168,8 @@ HandleWorkerCommandAsync(WorkerCommand, ct)
 | 11 | `HandleWorkerCommandAsync` | Main command dispatcher | HandleCommandAsync (Worker) |
 | 12 | `HandleUnsubscribeByGuidAsync` | Ref-counted unsubscribe by GUID (Numeric/String/Command) | HandleWorkerCommandAsync |
 | 13 | `SendDataRefSubscribeAsync` | Tracks index + sends WS subscribe | HandleWorkerCommandAsync |
-| 14 | `SendCommandSubscribeAsync` | Sends WS command_subscribe_is_active | HandleWorkerCommandAsync |
-| 15 | `SendCommandUnsubscribeAsync` | Sends WS command_unsubscribe_is_active | HandleUnsubscribeByGuidAsync |
+| 14 | `SendCommandSubscribeAsync` | Delegates to `SubscribeCommandUpdatesAsync` | HandleWorkerCommandAsync |
+| 15 | `SendCommandUnsubscribeAsync` | Delegates to `UnsubscribeCommandUpdatesAsync` | HandleUnsubscribeByGuidAsync |
 | 16 | `SubscribeDataRefsAsync` | Sends WS dataref_subscribe_values | SendDataRefSubscribeAsync |
 | 17 | `UnsubscribeAllDataRefsAsync` | Sends WS unsubscribe + clears dataref state | HandleWorkerCommandAsync |
 | 18 | `UnsubscribeAllCommandUpdatesAsync` | Sends WS unsubscribe + clears command state | HandleWorkerCommandAsync |

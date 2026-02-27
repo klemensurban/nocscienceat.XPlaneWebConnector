@@ -480,30 +480,26 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     // IXPlaneApi: WebSocket — Command subscriptions
     // ========================================================================
 
-    public async Task SubscribeCommandUpdatesAsync(IEnumerable<long> commandIds, Action<long, bool> onUpdate)
+    public async Task SubscribeCommandUpdatesAsync(IEnumerable<long> commandIds)
     {
-        foreach (var id in commandIds)
+        var request = new WsRequest<CommandSubscribeParams>
         {
-            var shim = new SimCommand { Command = _reverseCommandIdCache.GetValueOrDefault(id, $"id:{id}") };
-            var subId = Guid.NewGuid();
-            await _commandChannel.Writer.SendCommandAsync(
-                new WorkerCommand.SubscribeCommand(subId, id, shim, (_, isActive) => onUpdate(id, isActive)));
-        }
+            ReqId = Interlocked.Increment(ref _nextReqId),
+            Type = "command_subscribe_is_active",
+            Params = new CommandSubscribeParams { Commands = [.. commandIds.Select(id => new CommandIdEntry { Id = id })] }
+        };
+        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
     }
 
     public async Task UnsubscribeCommandUpdatesAsync(IEnumerable<long> commandIds)
     {
-        foreach (var id in commandIds)
+        var request = new WsRequest<CommandSubscribeParams>
         {
-            foreach (var kvp in _subscriptionRegistry)
-            {
-                if (kvp.Value.Kind == SubscriptionKind.Command && kvp.Value.DataRefId == id)
-                {
-                    await _commandChannel.Writer.SendCommandAsync(
-                        new WorkerCommand.UnsubscribeByGuid(kvp.Key));
-                }
-            }
-        }
+            ReqId = Interlocked.Increment(ref _nextReqId),
+            Type = "command_unsubscribe_is_active",
+            Params = new CommandSubscribeParams { Commands = [.. commandIds.Select(id => new CommandIdEntry { Id = id })] }
+        };
+        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
     }
 
     // ========================================================================
