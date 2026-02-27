@@ -115,8 +115,8 @@ SetDataRefValueAsync(SimDataRef, value)
   └─ SetDataRefValueAsync(string, float)
        ├─ ParseDataRefPath()                 ──► Utility.cs
        ├─ ResolveDataRefIdAsync()            ── this file
-       └─ HTTP transport: SetDataRefValueByIdAsync()       ── this file
-          WS transport:   SetDataRefValuesByWsAsync()      ── this file
+       └─ HTTP transport: SetDataRefValueByIdAsync()       ──► Api.cs
+          WS transport:   SetDataRefValuesByWsAsync()      ──► Api.cs
                             └─ SendWebSocketFireAndForgetAsync() ──► Transport.cs
 
 SetDataRefValueAsync(SimStringDataRef, value)
@@ -125,46 +125,9 @@ SetDataRefValueAsync(SimStringDataRef, value)
 SendCommandAsync(SimCommand)
   └─ SendCommandAsync(SimCommand, duration)
        ├─ ResolveCommandIdAsync()            ── this file
-       └─ HTTP transport: ActivateCommandAsync()           ── this file
-          WS transport:   SetCommandActiveAsync()          ── this file
+       └─ HTTP transport: ActivateCommandAsync()           ──► Api.cs
+          WS transport:   SetCommandActiveAsync()          ──► Api.cs
                             └─ SendWebSocketFireAndForgetAsync() ──► Transport.cs
-```
-
----
-
-## IXPlaneApi Methods (this file — used by high-level API)
-
-```
-SetDataRefValueByIdAsync()                   ── HTTP PATCH /datarefs/{id}/value
-ActivateCommandAsync()                       ── HTTP POST /command/{id}/activate
-```
-
-> Standalone REST methods (`GetCapabilitiesAsync`, `ListDataRefsAsync`,
-> `GetDataRefCountAsync`, `GetDataRefValueAsync`, `ListCommandsAsync`,
-> `GetCommandCountAsync`, `StartFlightAsync`, `UpdateFlightAsync`,
-> `BuildQueryUrl`) are in **Api.cs**.
-
----
-
-## WebSocket API Methods (IXPlaneApi)
-
-```
-SetDataRefValuesByWsAsync()
-  └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
-
-UnsubscribeDataRefsAsync()
-  └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
-
-SubscribeCommandUpdatesAsync(commandIds)
-  └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
-     (pure WS send: command_subscribe_is_active)
-
-UnsubscribeCommandUpdatesAsync(commandIds)
-  └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
-     (pure WS send: command_unsubscribe_is_active)
-
-SetCommandActiveAsync()
-  └─ SendWebSocketFireAndForgetAsync()       ──► Transport.cs
 ```
 
 ---
@@ -182,8 +145,9 @@ ResolveCommandIdAsync(path)                  ── HTTP GET /commands, caches i
 
 | Target File | Method Called | Trigger |
 |---|---|---|
+| **Api.cs** | `SetDataRefValueByIdAsync`, `SetDataRefValuesByWsAsync` | `SetDataRefValueAsync` |
+| **Api.cs** | `ActivateCommandAsync`, `SetCommandActiveAsync` | `SendCommandAsync` |
 | **Transport.cs** | `ConnectWebSocketAndReceiveAsync` | `Start()` |
-| **Transport.cs** | `SendWebSocketFireAndForgetAsync` | any WS send method |
 | **CallbackChannel.cs** | `StartCallbacksAsync` | `Start()` |
 | **Worker.cs** | `DataRefWorkerHandler` (ctor) | `Start()` |
 | **Worker.cs** | `HandleWorkerCommandAsync` | via command channel from `SubscribeAsync`, `SubscribeCommandAsync` |
@@ -194,4 +158,4 @@ ResolveCommandIdAsync(path)                  ── HTTP GET /commands, caches i
 | File | Responsibility |
 |---|---|
 | **Availability.cs** | `IsAvailableAsync`, `WaitUntilAvailableAsync` |
-| **Api.cs** | Standalone REST queries (capabilities, datarefs, commands, flight), `BuildQueryUrl` |
+| **Api.cs** | All stateless `IXPlaneApi` implementations (REST + WS sends), `BuildQueryUrl` |

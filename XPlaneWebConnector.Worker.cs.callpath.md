@@ -109,21 +109,21 @@ HandleWorkerCommandAsync(WorkerCommand, ct)
 │    ├─ RegisterNumericSubscription(guid, id, index, element, callback)
 │    │    └─ _subscriptionRegistry[guid] = new SubscriptionEntry(...)
 │    └─ SendDataRefSubscribeAsync(id, index)
-│         └─ SubscribeDataRefsAsync(datarefs)
-│              └─ SendWebSocketFireAndForgetAsync()               ──► Transport.cs
+│         └─ SubscribeDataRefsAsync(datarefs)              ──► Api.cs
+│              └─ SendWebSocketFireAndForgetAsync()         ──► Transport.cs
 │
 ├─ SubscribeString
 │    ├─ RegisterStringSubscription(guid, id, index, element, callback)
 │    │    └─ _subscriptionRegistry[guid] = new SubscriptionEntry(...)
 │    └─ SendDataRefSubscribeAsync(id, index)
-│         └─ SubscribeDataRefsAsync(datarefs)
-│              └─ SendWebSocketFireAndForgetAsync()               ──► Transport.cs
+│         └─ SubscribeDataRefsAsync(datarefs)              ──► Api.cs
+│              └─ SendWebSocketFireAndForgetAsync()         ──► Transport.cs
 │
 ├─ SubscribeCommand
 │    ├─ RegisterCommandSubscription(guid, id, element, callback)
 │    │    └─ _subscriptionRegistry[guid] = new SubscriptionEntry(..., Command)
 │    └─ SendCommandSubscribeAsync(id)
-│         └─ SubscribeCommandUpdatesAsync([id])           ──► XPlaneWebConnector.cs
+│         └─ SubscribeCommandUpdatesAsync([id])           ──► Api.cs
 │              └─ SendWebSocketFireAndForgetAsync()        ──► Transport.cs
 │
 ├─ UnsubscribeByGuid
@@ -132,8 +132,8 @@ HandleWorkerCommandAsync(WorkerCommand, ct)
 │         ├─ remove callback from _subscriptions, _stringSubscriptions, or _commandSubscriptions
 │         └─ if last consumer:
 │              ├─ Numeric/String: clean up _subscribedIndices
-│              │    └─ UnsubscribeDataRefsAsync()                  ──► Transport.cs
-│              └─ Command: SendCommandUnsubscribeAsync()          ──► XPlaneWebConnector.cs
+│              │    └─ UnsubscribeDataRefsAsync()                  ──► Api.cs
+│              └─ Command: SendCommandUnsubscribeAsync()          ──► Api.cs
 │                   └─ UnsubscribeCommandUpdatesAsync([id])       ──► Transport.cs
 │
 ├─ UnsubscribeAllDataRefs
@@ -167,12 +167,11 @@ HandleWorkerCommandAsync(WorkerCommand, ct)
 | 10 | `RegisterCommandSubscription` | Registers command sub + registry entry | HandleWorkerCommandAsync |
 | 11 | `HandleWorkerCommandAsync` | Main command dispatcher | HandleCommandAsync (Worker) |
 | 12 | `HandleUnsubscribeByGuidAsync` | Ref-counted unsubscribe by GUID (Numeric/String/Command) | HandleWorkerCommandAsync |
-| 13 | `SendDataRefSubscribeAsync` | Tracks index + sends WS subscribe | HandleWorkerCommandAsync |
-| 14 | `SendCommandSubscribeAsync` | Delegates to `SubscribeCommandUpdatesAsync` | HandleWorkerCommandAsync |
-| 15 | `SendCommandUnsubscribeAsync` | Delegates to `UnsubscribeCommandUpdatesAsync` | HandleUnsubscribeByGuidAsync |
-| 16 | `SubscribeDataRefsAsync` | Sends WS dataref_subscribe_values | SendDataRefSubscribeAsync |
-| 17 | `UnsubscribeAllDataRefsAsync` | Sends WS unsubscribe + clears dataref state | HandleWorkerCommandAsync |
-| 18 | `UnsubscribeAllCommandUpdatesAsync` | Sends WS unsubscribe + clears command state | HandleWorkerCommandAsync |
+| 13 | `SendDataRefSubscribeAsync` | Tracks index + delegates to `SubscribeDataRefsAsync` (Api.cs) | HandleWorkerCommandAsync |
+| 14 | `SendCommandSubscribeAsync` | Delegates to `SubscribeCommandUpdatesAsync` (Api.cs) | HandleWorkerCommandAsync |
+| 15 | `SendCommandUnsubscribeAsync` | Delegates to `UnsubscribeCommandUpdatesAsync` (Api.cs) | HandleUnsubscribeByGuidAsync |
+| 16 | `UnsubscribeAllDataRefsAsync` | Sends WS unsubscribe + clears dataref state | HandleWorkerCommandAsync |
+| 17 | `UnsubscribeAllCommandUpdatesAsync` | Sends WS unsubscribe + clears command state | HandleWorkerCommandAsync |
 
 ---
 
@@ -182,6 +181,8 @@ HandleWorkerCommandAsync(WorkerCommand, ct)
 |---|---|---|---|
 | **inbound** | ← XPlaneWebConnector.cs | `_commandChannel` write | Commands arrive from public API |
 | **inbound** | ← Transport.cs | `_dataChannel` write | WS messages arrive from receive loop |
-| **outbound** | → Transport.cs | `SendWebSocketFireAndForgetAsync` | Sends WS subscribe/unsubscribe messages |
+| **outbound** | → Api.cs | `SubscribeDataRefsAsync`, `UnsubscribeDataRefsAsync` | WS subscribe/unsubscribe datarefs |
+| **outbound** | → Api.cs | `SubscribeCommandUpdatesAsync`, `UnsubscribeCommandUpdatesAsync` | WS subscribe/unsubscribe commands |
+| **outbound** | → Transport.cs | `SendWebSocketFireAndForgetAsync` | Sends WS unsubscribe-all messages |
 | **outbound** | → CallbackChannel.cs | `_callbacks.Writer.TryWrite` | Queues callbacks for the callback thread |
 | **outbound** | → Utility.cs | `DecodeByteArrayToString` | Decodes byte-array datarefs to strings |
