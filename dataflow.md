@@ -160,8 +160,7 @@ The `ParseDataRefPath` method uses a source-generated regex to extract base path
 Consumer                        Library                          X-Plane
    │                               │                               │
    │  new XPlaneWebConnector(...)  │                               │
-   │──────────────────────────────>│  (constructor: saves config,  │
-   │                               │   creates HttpClient)         │
+   │──────────────────────────────>│  (constructor: saves config)  │
    │                               │                               │
    │  WaitUntilAvailableAsync()    │                               │
    │──────────────────────────────>│                               │
@@ -176,7 +175,8 @@ Consumer                        Library                          X-Plane
    │──────────────────────────────>│  Creates CancellationToken    │
    │                               │  Launches:                    │
    │                               │   ConnectWebSocketAndReceive  │
-   │                               │    └─ ProcessIncomingMessages │
+   │                               │   StartCallbacksAsync         │
+   │                               │   Worker.RunAsync             │
    │                               │                               │
    │                               │──── ws:// CONNECT ───────────>│
    │                               │<── WebSocket OPEN ────────────│
@@ -204,8 +204,8 @@ Consumer                        Library                          X-Plane
    │                               │  Clear caches                 │
    │                               │                               │
    │  Dispose()                    │                               │
-   │──────────────────────────────>│  Dispose CTS, WebSocket,      │
-   │                               │  HttpClient                   │
+   │──────────────────────────────>│  Dispose CTS, WebSocket       │
+   │                               │                               │
 ```
 
 ### Server-Initiated Shutdown
@@ -251,8 +251,10 @@ Consumer                         Library                                      X-
    │                                │     ← { data: [{ id: 42 }] } ──────────────│
    │                                │     cache[path] = 42                       │
    │                                │                                            │
-   │                                │  _subscriptions[(42, 7)] = (dataref, cb)   │
-   │                                │  _subscribedIndices[42].Add(7)             │
+   │                                │  _commandChannel → Worker thread:           │
+   │                                │    _subscriptions[(42, 7)] = (dataref, cb)  │
+   │                                │    _subscribedIndices[42].Add(7)            │
+   │                                │    _subscriptionRegistry[guid] = entry      │
    │                                │                                            │
    │                                │  WS → { req_id: N,                         │
    │                                │         type: "dataref_subscribe_values",  │
@@ -692,9 +694,9 @@ X-Plane's WebSocket API uses numeric session IDs, not string paths. The library 
   │  ├── _commandSubscriptions     (id → (SimCommand, callbacks))       │
   │  └── _subscriptionRegistry     (Guid → SubscriptionEntry)           │
 │                                                                     │
-│  Channel<byte[]> _incomingMessages:                                 │
-│  ├── Bounded(50), DropOldest                                        │
-│  ├── SingleReader = true (only ProcessIncomingMessagesAsync reads)  │
+│  Channel<XPlaneDataMessage> _dataChannel:                          │
+│  ├── Bounded(100), DropOldest                                       │
+│  ├── SingleReader = true (Worker reads via HandleData)              │
 │  └── Writer: ReceiveLoopAsync (single writer in practice)           │
 │                                                                     │
 │  int _nextReqId:                                                    │
@@ -703,9 +705,9 @@ X-Plane's WebSocket API uses numeric session IDs, not string paths. The library 
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-### Why two tasks?
+### Why three tasks?
 
-The WebSocket read must never stall. If callbacks are slow (e.g., a consumer writes to a serial port at 9600 baud), stalling the read would cause X-Plane's WebSocket send buffer to fill up. The bounded `Channel<byte[]>` decouples the two. If the processing task falls behind, the oldest (most stale) messages are dropped automatically — this is acceptable because dataref updates are idempotent (only the latest value matters).
+The WebSocket read must never stall. If the Worker or callbacks are slow, stalling the read would cause X-Plane's WebSocket send buffer to fill up. The bounded `_dataChannel` decouples the receive loop from the Worker. The unbounded `_callbacks` channel further decouples the Worker from consumer callbacks. If the receive loop outpaces the Worker, the oldest (most stale) messages are dropped automatically — this is acceptable because dataref updates are idempotent (only the latest value matters). The Worker itself is never blocked by slow consumer callbacks since it uses non-blocking `TryWrite` to enqueue `CallbackItem` entries.
 
 ---
 
@@ -887,10 +889,12 @@ X-Plane                   Library                 OvhPanelHandler              H
    │ { "42": 1.0 }           │                         │                          │
    │────────────────────────>│                         │                          │
    │                         │ ReceiveLoop             │                          │
-   │                         │  → Channel<byte[]>      │                          │
-   │                         │  → ProcessIncoming      │                          │
-   │                         │  → DispatchScalar       │                          │
+   │                         │  → _dataChannel          │                          │
+   │                         │  → Worker.HandleData     │                          │
+   │                         │  → DispatchScalar        │                          │
    │                         │    (id=42, val=1.0)     │                          │
+   │                         │  → _callbacks channel    │                          │
+   │                         │  → CallbackTask          │                          │
    │                         │                         │                          │
    │                         │ callback(SimDataRef,    │                          │
    │                         │          1.0)           │                          │
@@ -990,7 +994,7 @@ Program.cs                PanelHostedService       XPlaneWebConnector      OvhPa
 XPlaneWebConnector
 │
 ├── Transport
-│   ├── _httpClient                  HttpClient           Shared for all REST calls
+│   ├── _httpClientFactory           IHttpClientFactory    Creates HttpClients per-call
 │   ├── _webSocket                   ClientWebSocket?     Current WS connection
 │   ├── _cts                         CancellationTokenSource?  Lifecycle control
 │   └── _receiveTask                 Task?                Background WS receive
@@ -1090,7 +1094,7 @@ XPlaneWebConnector
 
 ### Bounded channel with DropOldest
 
-**Decision:** The incoming message channel has a capacity of 50 and drops the oldest message when full.
+**Decision:** The incoming message channel has a capacity of 100 and drops the oldest message when full.
 
 **Rationale:** Dataref updates are idempotent — only the latest value matters. If the consumer can't keep up (e.g., serial port writes at low baud rates), it's better to drop stale values than to accumulate backpressure and lag.
 
@@ -1122,4 +1126,4 @@ XPlaneWebConnector
 
 ---
 
-*This document reflects the library as of version 1.3.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*
+*This document reflects the library as of version 2.0.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*
