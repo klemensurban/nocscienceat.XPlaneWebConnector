@@ -456,7 +456,7 @@ Consumer                                Library                          X-Plane
 
 ## 6. Inbound Dataflow: X-Plane → Consumer
 
-Inbound data arrives exclusively via WebSocket. The library uses a **two-stage pipeline** to decouple fast WebSocket reads from potentially slow callback processing:
+Inbound data arrives exclusively via WebSocket. The library uses a **three-stage pipeline** to decouple fast WebSocket reads from JSON processing and potentially slow callback execution:
 
 ### 6.1 Pipeline Overview
 
@@ -480,20 +480,36 @@ X-Plane                    Library                                      Consumer
    │                          │                 │                          │
    │                          │                 ▼                          │
    │                          │  ┌──────────────────────────────────┐      │
-   │                          │  │ Channel<byte[]> (capacity: 50)   │      │
+   │                          │  │ _dataChannel (capacity: 100)     │      │
    │                          │  │ BoundedChannelFullMode.DropOldest│      │
    │                          │  │ SingleReader = true              │      │
    │                          │  └──────────────────────────────────┘      │
    │                          │                 │                          │
    │                          │                 ▼                          │
    │                          │  ┌─────────────────────────────────────┐   │
-   │                          │  │ Stage 2: ProcessIncomingMessagesAs  │   │
-   │                          │  │ (Thread: processing task)           │   │
+   │                          │  │ Stage 2: Worker (HandleData)        │   │
+   │                          │  │ (Thread: Worker task)               │   │
    │                          │  │                                     │   │
    │                          │  │ • JSON parse (JsonDocument)         │   │
    │                          │  │ • Dispatch by message type          │   │
    │                          │  │ • Look up registered callbacks      │   │
+   │                          │  │ • Enqueue CallbackItem into Channel │   │
+   │                          │  │   (non-blocking TryWrite)           │   │
+   │                          │  └─────────────────────────────────────┘   │
+   │                          │                 │                          │
+   │                          │                 ▼                          │
+   │                          │  ┌──────────────────────────────────┐      │
+   │                          │  │ _callbacks (unbounded)           │      │
+   │                          │  │ SingleReader = true              │      │
+   │                          │  └──────────────────────────────────┘      │
+   │                          │                 │                          │
+   │                          │                 ▼                          │
+   │                          │  ┌─────────────────────────────────────┐   │
+   │                          │  │ Stage 3: StartCallbacksAsync        │   │
+   │                          │  │ (Thread: callback task)             │   │
+   │                          │  │                                     │   │
    │                          │  │ • Invoke consumer callbacks         │   │
+   │                          │  │ • Sequential execution              │   │
    │                          │  └─────────────────────────────────────┘   │
    │                          │                        │                   │
    │                          │                        ▼                   │
@@ -643,14 +659,19 @@ X-Plane's WebSocket API uses numeric session IDs, not string paths. The library 
 │  ├── Owns the ClientWebSocket lifecycle                             │
 │  ├── Runs ReceiveLoopAsync in a tight loop                          │
 │  ├── Handles reconnection on failure                                │
-│  └── Writes raw byte[] into _incomingMessages Channel               │
+│  └── Writes raw byte[] into _dataChannel                            │
 │                                                                     │
-│  Task 2: ProcessIncomingMessagesAsync  (background, long-lived)     │
-│  ├── Reads from _incomingMessages Channel                           │
-│  ├── Parses JSON and dispatches callbacks                           │
-│  └── Consumer callbacks run ON THIS TASK                            │
-│      → A slow callback blocks all other dispatches                  │
-│      → Consumers should offload heavy work (e.g. to a Channel)      │
+│  Task 2: Worker (HandleData + HandleCommandAsync)  (long-lived)     │
+│  ├── Reads from _dataChannel and _commandChannel                    │
+│  ├── Parses JSON and dispatches to subscription dictionaries        │
+│  ├── Enqueues CallbackItem into _callbacks channel (non-blocking)   │
+│  └── Never blocked by slow consumer callbacks                       │
+│                                                                     │
+│  Task 3: StartCallbacksAsync  (background, long-lived)             │
+│  ├── Reads from _callbacks channel                                  │
+│  ├── Invokes consumer callbacks sequentially                        │
+│  └── A slow callback blocks other callbacks, but NOT the Worker     │
+│      → Consumers with heavy processing should offload to own queue  │
 │                                                                     │
 │  Consumer thread(s): Any thread calling the API                     │
 │  ├── SubscribeAsync, SetDataRefValueAsync, SendCommandAsync         │
@@ -1083,13 +1104,13 @@ XPlaneWebConnector
 
 **Trade-off:** The first button press or subscription for each unique dataref/command incurs a REST round-trip. During X-Plane startup (first ~60 seconds), the REST API can be slow due to simulator load. This is a known X-Plane limitation, not a library issue.
 
-### Single processing task
+### Single callback task
 
-**Decision:** All consumer callbacks are dispatched sequentially on a single processing task.
+**Decision:** All consumer callbacks are dispatched sequentially on a dedicated callback task, decoupled from the Worker via the `_callbacks` channel.
 
-**Rationale:** Simplifies callback ordering guarantees and avoids concurrent callback invocations for the same dataref.
+**Rationale:** Simplifies callback ordering guarantees and avoids concurrent callback invocations for the same dataref. The Worker is never blocked by slow callbacks — it enqueues `CallbackItem` via non-blocking `TryWrite` and continues processing the next message immediately.
 
-**Trade-off:** A slow callback blocks all other dispatches. Consumers with heavy processing (e.g., serial port writes) should offload work to their own queue/channel — as demonstrated by `PanelHandlerBase._serialWriteQueue` in the JavaSimulator.Console consumer.
+**Trade-off:** A slow callback blocks other callbacks (ordering is preserved), but does NOT block the Worker from processing incoming data or subscription commands. Consumers with heavy processing (e.g., serial port writes) can still offload to their own queue — as demonstrated by `PanelHandlerBase._serialWriteQueue` in the JavaSimulator.Console consumer.
 
 ### Source-generated JSON serialization
 
