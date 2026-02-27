@@ -91,15 +91,14 @@ SendWebSocketFireAndForgetAsync<T>(request, typeInfo)
 
 | Source File | Calling Method |
 |---|---|
-| **XPlaneWebConnector.cs** | `SetDataRefValuesByWsAsync` |
-| **XPlaneWebConnector.cs** | `SubscribeCommandUpdatesAsync` |
-| **XPlaneWebConnector.cs** | `UnsubscribeCommandUpdatesAsync` |
-| **XPlaneWebConnector.cs** | `SetCommandActiveAsync` |
-| **Worker.cs** | `SubscribeDataRefsAsync` |
-| **Worker.cs** | `UnsubscribeDataRefsAsync` (selective, via HandleUnsubscribeByGuidAsync) |
+| **Api.cs** | `SetDataRefValuesByWsAsync` |
+| **Api.cs** | `SubscribeDataRefsAsync` |
+| **Api.cs** | `UnsubscribeDataRefsAsync` |
+| **Api.cs** | `SubscribeCommandUpdatesAsync` |
+| **Api.cs** | `UnsubscribeCommandUpdatesAsync` |
+| **Api.cs** | `SetCommandActiveAsync` |
 | **Worker.cs** | `UnsubscribeAllDataRefsAsync` |
 | **Worker.cs** | `UnsubscribeAllCommandUpdatesAsync` |
-| **Worker.cs** | `HandleWorkerCommandAsync` (SubscribeCommandUpdates case, inline) |
 
 ---
 
@@ -119,7 +118,7 @@ SendWebSocketFireAndForgetAsync<T>(request, typeInfo)
 | Direction | Target File | Mechanism | Purpose |
 |---|---|---|---|
 | **inbound** | ← XPlaneWebConnector.cs | `Start()` calls `ConnectWebSocketAndReceiveAsync` | Starts receive loop |
-| **inbound** | ← Worker.cs | calls `SendWebSocketFireAndForgetAsync` | Worker sends subscribe/unsubscribe |
-| **inbound** | ← XPlaneWebConnector.cs | calls `SendWebSocketFireAndForgetAsync` | API methods send WS messages |
+| **inbound** | ← Worker.cs | calls `SendWebSocketFireAndForgetAsync` | Worker sends unsubscribe-all |
+| **inbound** | ← Api.cs | calls `SendWebSocketFireAndForgetAsync` | Stateless IXPlaneApi WS sends |
 | **outbound** | → Worker.cs | `_dataChannel.Writer.TryWrite` | Raw WS messages queued for worker thread |
 | **outbound** | → XPlaneWebConnector.cs | `ConnectionClosed?.Invoke()` | Signals connection loss |

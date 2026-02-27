@@ -357,19 +357,26 @@ builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
 │                                                      │
 │  ┌───────────────┐   ┌───────────────────────┐       │
 │  │  REST Client  │   │  WebSocket Connection │       │
-│  │  (HttpClient) │   │  ┌─────────────────┐  │       │
-│  │               │   │  │  Receive Loop   │  │       │
-│  │  • Resolve IDs│   │  │  (fast reader)  │  │       │
-│  │  • Query APIs │   │  └────────┬────────┘  │       │
-│  │               │   │           │           │       │
-│  └───────────────┘   │  ┌────────▼────────┐  │       │
-│                      │  │ Message Queue   │  │       │
-│  ID Caches           │  │ (Channel<T>)    │  │       │
-│  ┌─────────────────┐ │  └────────┬────────┘  │       │
-│  │ DataRef: path→id│ │  ┌────────▼────────┐  │       │
-│  │ Command: path→id│ │  │ Processing Task │  │       │
-│  └─────────────────┘ │  │ (dispatches     │  │       │
-│                      │  │  callbacks)     │  │       │
+│  │ (HttpClient-  │   │  ┌─────────────────┐  │       │
+│  │  Factory)     │   │  │  Receive Loop   │  │       │
+│  │               │   │  │  (fast reader)  │  │       │
+│  │  • Resolve IDs│   │  └────────┬────────┘  │       │
+│  │  • Query APIs │   │           │           │       │
+│  │               │   │  ┌────────▼────────┐  │       │
+│  └───────────────┘   │  │ _dataChannel   │  │       │
+│                      │  └────────┬────────┘  │       │
+│  ID Caches           │  ┌────────▼────────┐  │       │
+│  ┌─────────────────┐ │  │ Worker         │  │       │
+│  │ DataRef: path→id│ │  │ (JSON parse,   │  │       │
+│  │ Command: path→id│ │  │  dispatch)     │  │       │
+│  └─────────────────┘ │  └────────┬────────┘  │       │
+│                      │  ┌────────▼────────┐  │       │
+│                      │  │ _callbacks     │  │       │
+│                      │  └────────┬────────┘  │       │
+│                      │  ┌────────▼────────┐  │       │
+│                      │  │ Callback Task  │  │       │
+│                      │  │ (invokes user  │  │       │
+│                      │  │  callbacks)    │  │       │
 │                      │  └─────────────────┘  │       │
 │                      └───────────────────────┘       │
 └──────────────────────────────────────────────────────┘
@@ -385,7 +392,7 @@ builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
 - **Selectable transport** — `CommandSetDataRefTransport` controls whether commands and dataref writes use WebSocket (`command_set_is_active` / `dataref_set_values`) or HTTP REST (`POST /command/{id}/activate` / `PATCH /datarefs/{id}/value`). WebSocket is lower-latency; HTTP provides immediate error feedback.
 - **Fire-and-forget sends** — WebSocket sends never block waiting for acknowledgements. When `fireForgetOnHttpTransport` is enabled, HTTP write operations also return immediately; errors are caught and logged by an async local function without propagating to the caller.
 - **Proper resource disposal** — all `HttpResponseMessage` instances are disposed via `using` declarations to promptly return connections to the pool.
-- **Decoupled receive and processing** — WebSocket frames are read as fast as possible into a bounded `Channel<byte[]>`; a separate background task drains the queue and invokes callbacks. This ensures slow consumers (e.g. serial port writes) never stall the WebSocket read.
+- **Decoupled three-stage pipeline** — WebSocket frames are read into a bounded `_dataChannel`; the Worker parses JSON and enqueues `CallbackItem` entries into an unbounded `_callbacks` channel; a dedicated callback task invokes consumer callbacks. Slow consumers never stall the Worker or the receive loop.
 - **Lazy ID resolution with caching** — dataref and command names are resolved to session IDs via REST on first use and cached for the lifetime of the connection.
 - **Automatic reconnection** — if the WebSocket connection drops, the connector retries once after 3 seconds before signalling `ConnectionClosed`.
 
