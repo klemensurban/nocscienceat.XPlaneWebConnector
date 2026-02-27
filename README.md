@@ -308,9 +308,12 @@ The recommended way to register the connector is via `IXPlaneWebConnectorSetting
 }
 ```
 
-Registration:
+Registration (requires `IHttpClientFactory` — register via `AddHttpClient`):
 
 ```csharp
+// Register IHttpClientFactory
+builder.Services.AddHttpClient();
+
 var settings = builder.Configuration.GetSection("XPlane").Get<XPlaneWebConnectorSettings>()
     ?? new XPlaneWebConnectorSettings();
 
