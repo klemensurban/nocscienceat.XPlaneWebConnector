@@ -33,13 +33,13 @@ public sealed partial class XPlaneWebConnector
                     switch (callbackItem)
                     {
                         case CallbackItem.SimDataRefCb cb:
-                            cb.Callback(cb.Element);
+                            cb.Callback(cb.Value);
                             break;
                         case CallbackItem.SimStringDataRefCb cb:
-                            cb.Callback(cb.Element);
+                            cb.Callback(cb.Value);
                             break;
                         case CallbackItem.CommandCb cb:
-                            cb.Callback(cb.Element, cb.IsActive);
+                            cb.Callback(cb.IsActive);
                             break;
                     }
                 }

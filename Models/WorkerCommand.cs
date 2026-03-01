@@ -9,14 +9,12 @@ internal abstract record WorkerCommand
 {
     private WorkerCommand() { }
 
-    internal sealed record SubscribeNumeric(
-        Guid SubscriptionId, long Id, int Index, SimDataRef Element, Action<SimDataRef> Callback) : WorkerCommand;
+    internal sealed record SubscribeNumeric(Guid SubscriptionId, string dataRefPath, long Id, int Index, Action<float> Callback) : WorkerCommand;
 
-    internal sealed record SubscribeString(
-        Guid SubscriptionId, long Id, int Index, SimStringDataRef Element, Action<SimStringDataRef> Callback) : WorkerCommand;
+    internal sealed record SubscribeString(Guid SubscriptionId, string dataRefPath, long Id, int Index, Action<string> Callback) : WorkerCommand;
 
     internal sealed record SubscribeCommand(
-        Guid SubscriptionId, long Id, SimCommand Element, Action<SimCommand, bool> Callback) : WorkerCommand;
+        Guid SubscriptionId, long Id, SimCommand Element, Action<bool> Callback) : WorkerCommand;
 
     internal sealed record UnsubscribeByGuid(Guid SubscriptionId) : WorkerCommand;
 

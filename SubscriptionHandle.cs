@@ -16,12 +16,15 @@ public sealed class SubscriptionHandle : IDisposable
     private readonly ChannelWriter<CommandEnvelope<WorkerCommand, bool>> _commandWriter;
     private int _disposed;
 
-    internal SubscriptionHandle(Guid subscriptionId, ChannelWriter<CommandEnvelope<WorkerCommand, bool>> commandWriter)
+    internal SubscriptionHandle(Guid subscriptionId, ChannelWriter<CommandEnvelope<WorkerCommand, bool>> commandWriter, string path)
     {
         _subscriptionId = subscriptionId;
         _commandWriter = commandWriter;
+        Path = path;
     }
 
+    public string Path { get; }
+    
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
@@ -30,7 +33,6 @@ public sealed class SubscriptionHandle : IDisposable
         // Fire-and-forget: the consumer does not need to await unsubscription.
         // The Worker will process the command on its dedicated thread.
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        _commandWriter.TryWrite(new CommandEnvelope<WorkerCommand, bool>(
-            new WorkerCommand.UnsubscribeByGuid(_subscriptionId), tcs));
+        _commandWriter.TryWrite(new CommandEnvelope<WorkerCommand, bool>(new WorkerCommand.UnsubscribeByGuid(_subscriptionId), tcs));
     }
 }

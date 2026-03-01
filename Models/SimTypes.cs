@@ -3,30 +3,19 @@ namespace nocscienceat.XPlaneWebConnector.Models;
 /// <summary>
 /// Abstract base for dataref references. Holds the X-Plane dataref path.
 /// </summary>
-public abstract class SimDataRefBase
+internal abstract record DataRef(string DataRefPath)
 {
-    /// <summary>X-Plane dataref path (e.g. "sim/cockpit/autopilot/heading", "AirbusFBW/Foo[7]").</summary>
-    public string DataRefPath { get; init; } = "";
+    private DataRef() : this("") { }
 
-    public long TimeSTamp = 0;
-}
+    /// <summary>
+    /// Numeric dataref reference. Holds the X-Plane dataref path for a numeric (float) dataref.
+    /// </summary>
+    internal sealed record Float(string DataRefPath) : DataRef(DataRefPath);
 
-/// <summary>
-/// Numeric dataref reference. Holds the dataref path and the latest float value.
-/// </summary>
-public sealed class SimDataRef : SimDataRefBase
-{
-    /// <summary>Last received numeric value (updated by the connector on subscription callbacks).</summary>
-    public float Value { get; set; }
-}
-
-/// <summary>
-/// String/data-type dataref reference. Holds the dataref path and the latest string value.
-/// </summary>
-public sealed class SimStringDataRef : SimDataRefBase
-{
-    /// <summary>Last received string value (base64-decoded from X-Plane, updated on subscription callbacks).</summary>
-    public string Value { get; set; } = "";
+    /// <summary>
+    /// String/data-type dataref reference. Holds the X-Plane dataref path for a string/data dataref.
+    /// </summary>
+    internal sealed record String(string DataRefPath) : DataRef(DataRefPath);
 }
 
 /// <summary>

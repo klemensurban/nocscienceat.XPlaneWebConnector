@@ -4,7 +4,6 @@ namespace nocscienceat.XPlaneWebConnector.Interfaces;
 
 /// <summary>
 /// Abstraction for communicating with X-Plane.
-/// Implementations: <see cref="XPlaneConnectorAdapter"/> (UDP/NuGet), <see cref="XPlaneWebConnector"/> (REST+WebSocket).
 /// </summary>
 public interface IXPlaneWebConnector : IDisposable
 {
@@ -43,20 +42,14 @@ public interface IXPlaneWebConnector : IDisposable
     // ========================================================================
 
     /// <summary>Subscribes to a numeric dataRef. Dispose the returned handle to unsubscribe.</summary>
-    Task<IDisposable> SubscribeAsync(SimDataRef dataRef, Action<SimDataRef>? onchange = null);
+    Task<IDisposable> SubscribeAsync(string dataRefPath, Action<float> onchange);
 
     /// <summary>Subscribes to a string/data-type dataRef. Dispose the returned handle to unsubscribe.</summary>
-    Task<IDisposable> SubscribeAsync(SimStringDataRef dataRef, Action<SimStringDataRef>? onchange = null);
+    Task<IDisposable> SubscribeAsync(string dataRefPath, Action<string> onchange);
 
     // ========================================================================
     // DataRefPath writes
     // ========================================================================
-
-    /// <summary>Sets a dataRef value using a SimDataRef.</summary>
-    Task SetDataRefValueAsync(SimDataRef dataRef, float value);
-
-    /// <summary>Sets a string dataRef value using a SimStringDataRef.</summary>
-    Task SetDataRefValueAsync(SimStringDataRef dataRef, string value);
 
     /// <summary>Sets a numeric dataRefPath value by path.</summary>
     Task SetDataRefValueAsync(string dataRefPath, float value);
@@ -89,6 +82,6 @@ public interface IXPlaneWebConnector : IDisposable
     /// Dispose the returned handle to unsubscribe this consumer;
     /// X-Plane is unsubscribed only when the last consumer disposes.
     /// </summary>
-    Task<IDisposable> SubscribeCommandAsync(SimCommand command, Action<SimCommand, bool> onUpdate);
+    Task<IDisposable> SubscribeCommandAsync(SimCommand command, Action<bool> onUpdate);
 }
 

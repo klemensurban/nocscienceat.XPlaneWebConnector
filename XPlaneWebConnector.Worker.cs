@@ -1,9 +1,8 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using ChannelWorker;
+using Microsoft.Extensions.Logging;
 using nocscienceat.XPlaneWebConnector.Models;
-using System.Collections.Immutable;
 using System.Text;
 using System.Text.Json;
-using ChannelWorker;
 
 namespace nocscienceat.XPlaneWebConnector;
 
@@ -39,7 +38,7 @@ public sealed partial class XPlaneWebConnector
         switch (typeProp.GetString())
         {
             case "dataref_update_values":
-                HandleDataRefUpdates(root, dataMessage.TimeStamp);
+                HandleDataRefUpdates(root);
                 break;
 
             case "command_update_is_active":
@@ -64,7 +63,7 @@ public sealed partial class XPlaneWebConnector
     /// The "data" object has dynamic keys (dataRef session IDs as strings)
     /// with values that are either scalars or arrays — parsed with JsonDocument.
     /// </summary>
-    private void HandleDataRefUpdates(JsonElement root, long timeStamp)
+    private void HandleDataRefUpdates(JsonElement root)
     {
         if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object)
             return;
@@ -77,46 +76,40 @@ public sealed partial class XPlaneWebConnector
             switch (prop.Value.ValueKind)
             {
                 case JsonValueKind.Number:
-                    DispatchScalarUpdate(id, (float)prop.Value.GetDouble(), timeStamp);
+                    DispatchScalarUpdate(id, (float)prop.Value.GetDouble());
                     break;
 
                 case JsonValueKind.Array:
-                    DispatchArrayUpdate(id, prop.Value, timeStamp);
+                    DispatchArrayUpdate(id, prop.Value);
                     break;
 
                 case JsonValueKind.String:
-                    DispatchStringUpdate(id, prop.Value.GetString() ?? "", timeStamp);
+                    DispatchStringUpdate(id, prop.Value.GetString() ?? "");
                     break;
             }
         }
     }
 
-    private void DispatchScalarUpdate(long id, float value, long timeStamp)
+    private void DispatchScalarUpdate(long id, float value)
     {
         if (_subscriptions.TryGetValue((id, -1), out var sub))
         {
             if (_reverseDataRefIdCache.TryGetValue(id, out string name))            {
                 _logger.LogDebug("Received scalar update for dataRef {Name} (id={Id}): {Value}", name, id, value);
             }
-            sub.Element.Value = value;
-            sub.Element.TimeSTamp = timeStamp;
-            foreach (Action<SimDataRef> cb in sub.Callbacks)
+            foreach (Action<float> cb in sub.Callbacks)
             {
-                // try { cb(sub.Element); }
-                // catch (Exception ex) { _logger.LogWarning(ex, "Error in dataRef callback for id {Id}", id); }
-                _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, sub.Element));
+                _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, value));
             }
         }
     }
 
-    private void DispatchArrayUpdate(long id, JsonElement arrayElement, long timeStamp)
+    private void DispatchArrayUpdate(long id, JsonElement arrayElement)
     {
         // Check for string subscriptions first (data-type datarefs sent as arrays)
         if (_stringSubscriptions.TryGetValue((id, -1), out var strSub))
         {
             string decoded = DecodeByteArrayToString(arrayElement);
-            strSub.Element.Value = decoded;
-            strSub.Element.TimeSTamp = timeStamp;
             if (_reverseDataRefIdCache.TryGetValue(id, out string name))
             {
                 _logger.LogDebug("Received array update(string) for dataRef {Name} (id={Id}): {Value}", name, id, decoded);
@@ -124,9 +117,7 @@ public sealed partial class XPlaneWebConnector
 
             foreach (var cb in strSub.Callbacks)
             {
-                //try { cb(strSub.Element); }
-                //catch (Exception ex) { _logger.LogWarning(ex, "Error in string dataRef callback for id {Id}", id); }
-                _callbacks.Writer.TryWrite(new CallbackItem.SimStringDataRefCb(cb, strSub.Element));
+                _callbacks.Writer.TryWrite(new CallbackItem.SimStringDataRefCb(cb, decoded));
             }
             return;
         }
@@ -134,8 +125,7 @@ public sealed partial class XPlaneWebConnector
         // Numeric array: map positional values back to subscribed indices
         if (_subscribedIndices.TryGetValue(id, out var indices))
         {
-            int[] sortedIndices;
-            lock (indices) { sortedIndices = [.. indices]; }
+            int[] sortedIndices = [.. indices];
 
             int pos = 0;
             foreach (var element in arrayElement.EnumerateArray())
@@ -151,13 +141,9 @@ public sealed partial class XPlaneWebConnector
                         // if (name != "AirbusFBW/BatVolts")
                             _logger.LogDebug("Received array update(indexed) for dataRef {Name} (id={Id}), Index {idx} : {Value}", name, id, idx, val );
                     }
-                    sub.Element.Value = val;
-                    sub.Element.TimeSTamp = timeStamp;
                     foreach (var cb in sub.Callbacks)
                     {
-                        //try { cb(sub.Element); }
-                        //catch (Exception ex) { _logger.LogWarning(ex, "Error in dataRef callback for id {Id}[{Index}]", id, idx); }
-                        _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, sub.Element));
+                        _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, val));
                     }
                 }
                 pos++;
@@ -172,17 +158,13 @@ public sealed partial class XPlaneWebConnector
                 if (_subscriptions.TryGetValue((id, pos), out var sub))
                 {
                     var val = (float)element.GetDouble();
-                    sub.Element.Value = val;
-                    sub.Element.TimeSTamp = timeStamp;
                     if (_reverseDataRefIdCache.TryGetValue(id, out string name))
                     {
                         _logger.LogDebug("Received array update(full) for dataRef {Name} (id={Id})  : {Value}", name, id, val);
                     }
                     foreach (var cb in sub.Callbacks)
                     {
-                        //try { cb(sub.Element); }
-                        //catch (Exception ex) { _logger.LogWarning(ex, "Error in dataRef callback for id {Id}[{Index}]", id, pos); }
-                        _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, sub.Element));
+                        _callbacks.Writer.TryWrite(new CallbackItem.SimDataRefCb(cb, val));
                     }
                 }
                 pos++;
@@ -190,10 +172,15 @@ public sealed partial class XPlaneWebConnector
         }
     }
 
-    private void DispatchStringUpdate(long id, string base64, long timeStamp)
+    private void DispatchStringUpdate(long id, string base64)
     {
         string decoded;
-        try { decoded = Encoding.UTF8.GetString(Convert.FromBase64String(base64)); }
+        try
+        {
+            byte[] bytes = Convert.FromBase64String(base64);
+            int len = Array.IndexOf(bytes, (byte)0);
+            decoded = Encoding.UTF8.GetString(bytes, 0, len >= 0 ? len : bytes.Length);
+        }
         catch { decoded = base64; }
 
         if (_stringSubscriptions.TryGetValue((id, -1), out var sub))
@@ -202,13 +189,9 @@ public sealed partial class XPlaneWebConnector
             {
                 _logger.LogDebug("Received string for dataRef {Name} (id={Id}): {Value}", name, id, decoded);
             }
-            sub.Element.Value = decoded;
-            sub.Element.TimeSTamp = timeStamp;
             foreach (var cb in sub.Callbacks)
             {
-                //try { cb(sub.Element); }
-                //catch (Exception ex) { _logger.LogWarning(ex, "Error in string dataRef callback for id {Id}", id); }
-                _callbacks.Writer.TryWrite(new CallbackItem.SimStringDataRefCb(cb, sub.Element));
+                _callbacks.Writer.TryWrite(new CallbackItem.SimStringDataRefCb(cb, decoded));
             }
         }
     }
@@ -236,7 +219,7 @@ public sealed partial class XPlaneWebConnector
             }
             foreach (var cb in sub.Callbacks)
             {
-                _callbacks.Writer.TryWrite(new CallbackItem.CommandCb(cb, sub.Element, isActive));
+                _callbacks.Writer.TryWrite(new CallbackItem.CommandCb(cb, isActive));
             }
         }
     }
@@ -249,13 +232,19 @@ public sealed partial class XPlaneWebConnector
     /// Registers a numeric dataRef subscription. Returns true if this is a new subscription.
     /// Called on the Worker thread via <see cref="HandleWorkerCommandAsync"/>.
     /// </summary>
-    private bool RegisterNumericSubscription(Guid subscriptionId, long id, int index, SimDataRef element, Action<SimDataRef> callback)
+    private bool RegisterNumericSubscription(Guid subscriptionId, long id, int index, DataRef.Float dataref, Action<float> callback)
     {
         bool added = false;
-        _subscriptions.AddOrUpdate(
-            (id, index),
-            _ => { added = true; return (element, ImmutableArray.Create(callback)); },
-            (_, existing) => (existing.Element, existing.Callbacks.Add(callback)));
+        var key = (id, index);
+        if (_subscriptions.TryGetValue(key, out var existing))
+        {
+            existing.Callbacks.Add(callback);
+        }
+        else
+        {
+            _subscriptions[key] = (dataref, new List<Action<float>> { callback });
+            added = true;
+        }
 
         _subscriptionRegistry[subscriptionId] = new SubscriptionEntry(id, index, SubscriptionKind.Numeric, callback);
 
@@ -266,13 +255,19 @@ public sealed partial class XPlaneWebConnector
     /// Registers a string dataRef subscription. Returns true if this is a new subscription.
     /// Called on the Worker thread via <see cref="HandleWorkerCommandAsync"/>.
     /// </summary>
-    private bool RegisterStringSubscription(Guid subscriptionId, long id, int index, SimStringDataRef element, Action<SimStringDataRef> callback)
+    private bool RegisterStringSubscription(Guid subscriptionId, long id, int index, DataRef.String element, Action<string> callback)
     {
         bool added = false;
-        _stringSubscriptions.AddOrUpdate(
-            (id, index),
-            _ => { added = true; return (element, ImmutableArray.Create(callback)); },
-            (_, existing) => (existing.Element, existing.Callbacks.Add(callback)));
+        var key = (id, index);
+        if (_stringSubscriptions.TryGetValue(key, out var existing))
+        {
+            existing.Callbacks.Add(callback);
+        }
+        else
+        {
+            _stringSubscriptions[key] = (element, new List<Action<string>> { callback });
+            added = true;
+        }
 
         _subscriptionRegistry[subscriptionId] = new SubscriptionEntry(id, index, SubscriptionKind.String, callback);
 
@@ -283,13 +278,18 @@ public sealed partial class XPlaneWebConnector
     /// Registers a command activation subscription. Returns true if this is a new subscription.
     /// Called on the Worker thread via <see cref="HandleWorkerCommandAsync"/>.
     /// </summary>
-    private bool RegisterCommandSubscription(Guid subscriptionId, long id, SimCommand element, Action<SimCommand, bool> callback)
+    private bool RegisterCommandSubscription(Guid subscriptionId, long id, SimCommand element, Action<bool> callback)
     {
         bool added = false;
-        _commandSubscriptions.AddOrUpdate(
-            id,
-            _ => { added = true; return (element, ImmutableArray.Create(callback)); },
-            (_, existing) => (existing.Element, existing.Callbacks.Add(callback)));
+        if (_commandSubscriptions.TryGetValue(id, out var existing))
+        {
+            existing.Callbacks.Add(callback);
+        }
+        else
+        {
+            _commandSubscriptions[id] = (element, new List<Action<bool>> { callback });
+            added = true;
+        }
 
         _subscriptionRegistry[subscriptionId] = new SubscriptionEntry(id, -1, SubscriptionKind.Command, callback);
 
@@ -305,12 +305,14 @@ public sealed partial class XPlaneWebConnector
         switch (command)
         {
             case WorkerCommand.SubscribeNumeric sub:
-                if (RegisterNumericSubscription(sub.SubscriptionId, sub.Id, sub.Index, sub.Element, sub.Callback))
+                DataRef.Float dataref = new DataRef.Float(sub.dataRefPath);
+                if (RegisterNumericSubscription(sub.SubscriptionId, sub.Id, sub.Index, dataref, sub.Callback))
                     await SendDataRefSubscribeAsync(sub.Id, sub.Index);
                 return true;
 
             case WorkerCommand.SubscribeString sub:
-                if (RegisterStringSubscription(sub.SubscriptionId, sub.Id, sub.Index, sub.Element, sub.Callback))
+                DataRef.String stringdataref = new DataRef.String(sub.dataRefPath);
+                if (RegisterStringSubscription(sub.SubscriptionId, sub.Id, sub.Index, stringdataref, sub.Callback))
                     await SendDataRefSubscribeAsync(sub.Id, sub.Index);
                 return true;
 
@@ -349,7 +351,7 @@ public sealed partial class XPlaneWebConnector
     /// </summary>
     private async Task HandleUnsubscribeByGuidAsync(Guid subscriptionId)
     {
-        if (!_subscriptionRegistry.TryRemove(subscriptionId, out var entry))
+        if (!_subscriptionRegistry.Remove(subscriptionId, out var entry))
         {
             _logger.LogDebug("Unsubscribe: GUID {SubId} not found in registry (already removed?)", subscriptionId);
             return;
@@ -363,15 +365,11 @@ public sealed partial class XPlaneWebConnector
             case SubscriptionKind.Numeric:
                 if (_subscriptions.TryGetValue(key, out var numSub))
                 {
-                    var updated = numSub.Callbacks.Remove((Action<SimDataRef>)entry.Callback);
-                    if (updated.IsEmpty)
+                    numSub.Callbacks.Remove((Action<float>)entry.Callback);
+                    if (numSub.Callbacks.Count == 0)
                     {
-                        _subscriptions.TryRemove(key, out _);
+                        _subscriptions.Remove(key);
                         lastConsumer = true;
-                    }
-                    else
-                    {
-                        _subscriptions[key] = (numSub.Element, updated);
                     }
                 }
                 break;
@@ -379,15 +377,11 @@ public sealed partial class XPlaneWebConnector
             case SubscriptionKind.String:
                 if (_stringSubscriptions.TryGetValue(key, out var strSub))
                 {
-                    var updated = strSub.Callbacks.Remove((Action<SimStringDataRef>)entry.Callback);
-                    if (updated.IsEmpty)
+                    strSub.Callbacks.Remove((Action<string>)entry.Callback);
+                    if (strSub.Callbacks.Count == 0)
                     {
-                        _stringSubscriptions.TryRemove(key, out _);
+                        _stringSubscriptions.Remove(key);
                         lastConsumer = true;
-                    }
-                    else
-                    {
-                        _stringSubscriptions[key] = (strSub.Element, updated);
                     }
                 }
                 break;
@@ -395,15 +389,11 @@ public sealed partial class XPlaneWebConnector
             case SubscriptionKind.Command:
                 if (_commandSubscriptions.TryGetValue(entry.DataRefId, out var cmdSub))
                 {
-                    var updated = cmdSub.Callbacks.Remove((Action<SimCommand, bool>)entry.Callback);
-                    if (updated.IsEmpty)
+                    cmdSub.Callbacks.Remove((Action<bool>)entry.Callback);
+                    if (cmdSub.Callbacks.Count == 0)
                     {
-                        _commandSubscriptions.TryRemove(entry.DataRefId, out _);
+                        _commandSubscriptions.Remove(entry.DataRefId);
                         lastConsumer = true;
-                    }
-                    else
-                    {
-                        _commandSubscriptions[entry.DataRefId] = (cmdSub.Element, updated);
                     }
                 }
                 break;
@@ -416,12 +406,9 @@ public sealed partial class XPlaneWebConnector
                 // Clean up index tracking
                 if (entry.Index >= 0 && _subscribedIndices.TryGetValue(entry.DataRefId, out var indices))
                 {
-                    lock (indices)
-                    {
-                        indices.Remove(entry.Index);
-                        if (indices.Count == 0)
-                            _subscribedIndices.TryRemove(entry.DataRefId, out _);
-                    }
+                    indices.Remove(entry.Index);
+                    if (indices.Count == 0)
+                        _subscribedIndices.Remove(entry.DataRefId);
                 }
 
                 // Tell X-Plane to stop sending updates for this dataRef
@@ -454,8 +441,12 @@ public sealed partial class XPlaneWebConnector
     {
         if (index >= 0)
         {
-            var indices = _subscribedIndices.GetOrAdd(id, _ => new SortedSet<int>());
-            lock (indices) { indices.Add(index); }
+            if (!_subscribedIndices.TryGetValue(id, out var indices))
+            {
+                indices = new SortedSet<int>();
+                _subscribedIndices[id] = indices;
+            }
+            indices.Add(index);
         }
 
         await SubscribeDataRefsAsync([new DataRefSubscribeEntry { Id = id, Index = index >= 0 ? JsonSerializer.SerializeToElement(index) : null }]);
@@ -479,11 +470,12 @@ public sealed partial class XPlaneWebConnector
         _subscriptions.Clear();
         _stringSubscriptions.Clear();
         _subscribedIndices.Clear();
-        foreach (var kvp in _subscriptionRegistry)
-        {
-            if (kvp.Value.Kind is SubscriptionKind.Numeric or SubscriptionKind.String)
-                _subscriptionRegistry.TryRemove(kvp.Key, out _);
-        }
+        var dataRefKeys = _subscriptionRegistry
+            .Where(kvp => kvp.Value.Kind is SubscriptionKind.Numeric or SubscriptionKind.String)
+            .Select(kvp => kvp.Key)
+            .ToList();
+        foreach (var key in dataRefKeys)
+            _subscriptionRegistry.Remove(key);
     }
 
     public async Task UnsubscribeAllCommandUpdatesAsync()
@@ -496,10 +488,11 @@ public sealed partial class XPlaneWebConnector
         };
         await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandUnsubscribeAllParams);
         _commandSubscriptions.Clear();
-        foreach (var kvp in _subscriptionRegistry)
-        {
-            if (kvp.Value.Kind == SubscriptionKind.Command)
-                _subscriptionRegistry.TryRemove(kvp.Key, out _);
-        }
+        var commandKeys = _subscriptionRegistry
+            .Where(kvp => kvp.Value.Kind == SubscriptionKind.Command)
+            .Select(kvp => kvp.Key)
+            .ToList();
+        foreach (var key in commandKeys)
+            _subscriptionRegistry.Remove(key);
     }
 }

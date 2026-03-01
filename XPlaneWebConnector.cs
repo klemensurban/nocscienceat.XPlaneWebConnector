@@ -3,7 +3,6 @@ using Microsoft.Extensions.Logging;
 using nocscienceat.XPlaneWebConnector.Interfaces;
 using nocscienceat.XPlaneWebConnector.Models;
 using System.Collections.Concurrent;
-using System.Collections.Immutable;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -38,29 +37,34 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     private Task? _workerTask;
 
     // Dataref session-ID caches (path ? id). Cleared when X-Plane restarts.
-    private readonly ConcurrentDictionary<string, long> _dataRefIdCache = new();
+    private readonly ConcurrentDictionary<string, XPlaneDataRefInfo> _dataRefIdCache = new();
     private readonly ConcurrentDictionary<long, string> _reverseDataRefIdCache = new();
     private readonly ConcurrentDictionary<string, long> _commandIdCache = new();
     private readonly ConcurrentDictionary<long, string> _reverseCommandIdCache = new();
 
-    // Numeric dataRef subscriptions: (sessionId, arrayIndex) ? (element, callbacks)
-    private readonly ConcurrentDictionary<(long Id, int Index), (SimDataRef Element, ImmutableArray<Action<SimDataRef>> Callbacks)> _subscriptions = new();
+    // Numeric dataRef subscriptions: (sessionId, arrayIndex) -> (element, callbacks)
+    // Accessed exclusively on the Worker thread.
+    private readonly Dictionary<(long Id, int Index), (DataRef.Float Dataref, List<Action<float>> Callbacks)> _subscriptions = new();
 
-    // String/data dataRef subscriptions: (sessionId, arrayIndex) ? (element, callbacks)
-    private readonly ConcurrentDictionary<(long Id, int Index), (SimStringDataRef Element, ImmutableArray<Action<SimStringDataRef>> Callbacks)> _stringSubscriptions = new();
+    // String/data dataRef subscriptions: (sessionId, arrayIndex) -> (element, callbacks)
+    // Accessed exclusively on the Worker thread.
+    private readonly Dictionary<(long Id, int Index), (DataRef.String Element, List<Action<string>> Callbacks)> _stringSubscriptions = new();
 
     // Tracks which array indices are subscribed per dataRef ID.
     // X-Plane sends array updates with values for subscribed indices in sorted order;
     // we need this map to correlate array positions back to the original indices.
-    private readonly ConcurrentDictionary<long, SortedSet<int>> _subscribedIndices = new();
+    // Accessed exclusively on the Worker thread.
+    private readonly Dictionary<long, SortedSet<int>> _subscribedIndices = new();
 
     // Per-consumer subscription registry: each SubscribeAsync call gets a unique GUID.
     // Multiple GUIDs can map to the same (Id, Index) when multiple panels subscribe
-    // to the same dataRef. Used for future per-consumer unsubscription with reference counting.
-    private readonly ConcurrentDictionary<Guid, SubscriptionEntry> _subscriptionRegistry = new();
+    // to the same dataRef. Used for per-consumer unsubscription with reference counting.
+    // Accessed exclusively on the Worker thread.
+    private readonly Dictionary<Guid, SubscriptionEntry> _subscriptionRegistry = new();
 
-    // Command activation subscriptions: command session ID ? (element, callbacks)
-    private readonly ConcurrentDictionary<long, (SimCommand Element, ImmutableArray<Action<SimCommand, bool>> Callbacks)> _commandSubscriptions = new();
+    // Command activation subscriptions: command session ID -> (element, callbacks)
+    // Accessed exclusively on the Worker thread.
+    private readonly Dictionary<long, (SimCommand Element, List<Action<bool>> Callbacks)> _commandSubscriptions = new();
 
     // Monotonically increasing request ID for WebSocket messages
     private int _nextReqId;
@@ -189,52 +193,40 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     // IXPlaneWebConnector: Subscribe to dataRef updates (WebSocket)
     // ========================================================================
 
-    public async Task<IDisposable> SubscribeAsync(SimDataRef dataRef, Action<SimDataRef>? onchange = null)
+    public async Task<IDisposable> SubscribeAsync(string dataRefPath, Action<float> onchange)
     {
-        var (basePath, index) = ParseDataRefPath(dataRef.DataRefPath);
-        var id = await ResolveDataRefIdAsync(basePath);
-        var cb = onchange ?? ((_) => { });
         var subId = Guid.NewGuid();
-
+        var (basePath, index) = ParseDataRefPath(dataRefPath);
+        XPlaneDataRefInfo xPlaneDataRefInfo = await ResolveDataRefIdAsync(basePath);
+        
         await _commandChannel.Writer.SendCommandAsync(
-            new WorkerCommand.SubscribeNumeric(subId, id, index, dataRef, cb));
+            new WorkerCommand.SubscribeNumeric(subId, dataRefPath, xPlaneDataRefInfo.Id, index, onchange));
 
-        _logger.LogDebug("Subscribed to dataRef {Name} (id={Id}, index={Index}, subId={SubId})", dataRef.DataRefPath, id, index, subId);
-        return new SubscriptionHandle(subId, _commandChannel.Writer);
+        _logger.LogDebug("Subscribed to dataRef {Name} (X-Plane Id={Id}, Subscription Id={SubId})", dataRefPath, xPlaneDataRefInfo.Id, subId);
+        return new SubscriptionHandle(subId, _commandChannel.Writer, dataRefPath);
     }
 
-    public async Task<IDisposable> SubscribeAsync(SimStringDataRef dataRef, Action<SimStringDataRef>? onchange = null)
+    public async Task<IDisposable> SubscribeAsync(string dataRefPath, Action<string> onchange)
     {
-        var (basePath, index) = ParseDataRefPath(dataRef.DataRefPath);
-        var id = await ResolveDataRefIdAsync(basePath);
-        var cb = onchange ?? ((_) => { });
         var subId = Guid.NewGuid();
+        var (basePath, index) = ParseDataRefPath(dataRefPath);
+        XPlaneDataRefInfo xPlaneDataRefInfo = await ResolveDataRefIdAsync(basePath);
 
         await _commandChannel.Writer.SendCommandAsync(
-            new WorkerCommand.SubscribeString(subId, id, index, dataRef, cb));
+            new WorkerCommand.SubscribeString(subId, dataRefPath, xPlaneDataRefInfo.Id, index, onchange));
 
-        _logger.LogDebug("Subscribed to string dataRef {Name} (id={Id}, index={Index}, subId={SubId})", dataRef.DataRefPath, id, index, subId);
-        return new SubscriptionHandle(subId, _commandChannel.Writer);
+        _logger.LogDebug("Subscribed to dataRef {Name} (X-Plane Id={Id}, Subscription Id={SubId})", dataRefPath, xPlaneDataRefInfo.Id, subId);
+        return new SubscriptionHandle(subId, _commandChannel.Writer, dataRefPath);
     }
 
     // ========================================================================
     // IXPlaneWebConnector: Set dataRef value (WebSocket or HTTP PATCH)
     // ========================================================================
 
-    public async Task SetDataRefValueAsync(SimDataRef dataRef, float value)
-    {
-        await SetDataRefValueAsync(dataRef.DataRefPath, value);
-    }
-
-    public async Task SetDataRefValueAsync(SimStringDataRef dataRef, string value)
-    {
-        await SetDataRefValueAsync(dataRef.DataRefPath, value);
-    }
-
     public async Task SetDataRefValueAsync(string dataRefPath, float value)
     {
         var (basePath, index) = ParseDataRefPath(dataRefPath);
-        var id = await ResolveDataRefIdAsync(basePath);
+        XPlaneDataRefInfo xPlaneDataRefInfo = await ResolveDataRefIdAsync(basePath);
         using var doc = JsonDocument.Parse(value.ToString(System.Globalization.CultureInfo.InvariantCulture));
         var jsonValue = doc.RootElement.Clone();
         var idx = index >= 0 ? index : (int?)null;
@@ -242,12 +234,12 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         switch (_transport)
         {
             case CommandSetDataRefTransport.Http:
-                await SetDataRefValueByIdAsync(id, jsonValue, idx);
+                await SetDataRefValueByIdAsync(xPlaneDataRefInfo.Id, jsonValue, idx);
                 break;
 
             case CommandSetDataRefTransport.WebSocket:
             default:
-                await SetDataRefValuesByWsAsync([new DataRefSetEntry { Id = id, Value = jsonValue, Index = idx }]);
+                await SetDataRefValuesByWsAsync([new DataRefSetEntry { Id = xPlaneDataRefInfo.Id, Value = jsonValue, Index = idx }]);
                 break;
         }
         _logger.LogDebug("SetDataRefValueAsync Dataref: {dataRef}, Value:{value}", dataRefPath, value);
@@ -256,7 +248,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     public async Task SetDataRefValueAsync(string dataRefPath, string value)
     {
         var (basePath, index) = ParseDataRefPath(dataRefPath);
-        var id = await ResolveDataRefIdAsync(basePath);
+        XPlaneDataRefInfo xPlaneDataRefInfo = await ResolveDataRefIdAsync(basePath);
         var base64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
         using var doc = JsonDocument.Parse($"\"{base64}\"");
         var jsonValue = doc.RootElement.Clone();
@@ -265,12 +257,12 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         switch (_transport)
         {
             case CommandSetDataRefTransport.Http:
-                await SetDataRefValueByIdAsync(id, jsonValue, idx);
+                await SetDataRefValueByIdAsync(xPlaneDataRefInfo.Id, jsonValue, idx);
                 break;
 
             case CommandSetDataRefTransport.WebSocket:
             default:
-                await SetDataRefValuesByWsAsync([new DataRefSetEntry { Id = id, Value = jsonValue, Index = idx }]);
+                await SetDataRefValuesByWsAsync([new DataRefSetEntry { Id = xPlaneDataRefInfo.Id, Value = jsonValue, Index = idx }]);
                 break;
         }
         _logger.LogDebug("SetDataRefValueAsync Dataref: {dataRef}, Value:{value}", dataRefPath, value);
@@ -311,26 +303,26 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     // REST: Resolve dataRef/command names to session IDs
     // ========================================================================
 
-    private async Task<long> ResolveDataRefIdAsync(string dataRefPath)
+    private async Task<XPlaneDataRefInfo> ResolveDataRefIdAsync(string dataRefPath)
     {
-        if (_dataRefIdCache.TryGetValue(dataRefPath, out var cachedId))
-            return cachedId;
+        if (_dataRefIdCache.TryGetValue(dataRefPath, out var cachedXPlaneDataRefInfo))
+            return cachedXPlaneDataRefInfo;
 
         var url = $"{_baseUrl}/datarefs?filter[name]={Uri.EscapeDataString(dataRefPath)}&fields=id,name";
         using var response = await _httpClientFactory.CreateClient().GetAsync(url);
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync();
-        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo);
+        XPlaneListResponse<XPlaneDataRefInfo>? result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo);
 
         if (result?.Data is not { Count: > 0 })
             throw new KeyNotFoundException($"Dataref '{dataRefPath}' not found in X-Plane");
 
-        var id = result.Data[0].Id;
-        _dataRefIdCache[dataRefPath] = id;
-        _reverseDataRefIdCache[id] = dataRefPath;
-        _logger.LogDebug("Resolved dataRef {Name} ? id {Id}", dataRefPath, id);
-        return id;
+        XPlaneDataRefInfo xPlaneDataRefInfo = result.Data[0];
+        _dataRefIdCache[dataRefPath] = xPlaneDataRefInfo;
+        _reverseDataRefIdCache[xPlaneDataRefInfo.Id] = dataRefPath;
+        _logger.LogDebug("Resolved dataRef {Name} ? id {Id}", dataRefPath, xPlaneDataRefInfo.Id);
+        return xPlaneDataRefInfo;
     }
 
     private async Task<long> ResolveCommandIdAsync(string commandPath)
@@ -360,7 +352,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     // IXPlaneWebConnector: Subscribe to command activation updates (WebSocket)
     // ========================================================================
 
-    public async Task<IDisposable> SubscribeCommandAsync(SimCommand command, Action<SimCommand, bool> onUpdate)
+    public async Task<IDisposable> SubscribeCommandAsync(SimCommand command, Action<bool> onUpdate)
     {
         var id = await ResolveCommandIdAsync(command.Command);
         var subId = Guid.NewGuid();
@@ -369,7 +361,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             new WorkerCommand.SubscribeCommand(subId, id, command, onUpdate));
 
         _logger.LogDebug("Subscribed to command {Name} (id={Id}, subId={SubId})", command.Command, id, subId);
-        return new SubscriptionHandle(subId, _commandChannel.Writer);
+        return new SubscriptionHandle(subId, _commandChannel.Writer, command.Command);
     }
 
     // ========================================================================

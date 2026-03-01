@@ -1,6 +1,5 @@
 using Microsoft.Extensions.Logging;
 using nocscienceat.XPlaneWebConnector.Models;
-using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Text.Json;
 
@@ -92,7 +91,6 @@ public sealed partial class XPlaneWebConnector
     {
         var buffer = new byte[8192];
         int counter = 0;
-        long timeStamp;
         while (_webSocket?.State == WebSocketState.Open && !ct.IsCancellationRequested)
         {
             var result = await _webSocket.ReceiveAsync(buffer, ct);
@@ -119,21 +117,8 @@ public sealed partial class XPlaneWebConnector
                 messageBytes = await AssembleMultiFrameMessageAsync(buffer, result.Count, ct);
             }
 
-            bool statistic = false;
-            // if (counter++ == 1024) timeStamp = Stopwatch.GetTimestamp(),  0 otherwise
-            if ((counter++ & 128) == 0)
-                timeStamp = 0;
-            else
-            {
-                timeStamp = Stopwatch.GetTimestamp();
-                counter = 0;
-                statistic = true;
-            }
-
-            XPlaneDataMessage dataMessage = new(timeStamp, messageBytes);
+            XPlaneDataMessage dataMessage = new(messageBytes);
             _dataChannel.Writer.TryWrite(dataMessage);
-            if (statistic)
-                _logger.LogInformation("Number of Messages in Data-Queue: {n}", _dataChannel.Reader.Count);
         }
     }
 

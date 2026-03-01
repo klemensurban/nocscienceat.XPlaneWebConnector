@@ -5,18 +5,17 @@ internal abstract record CallbackItem
     private CallbackItem(){}
 
     internal sealed record SimDataRefCb (
-        Action<SimDataRef> Callback,
-        SimDataRef Element
+        Action<float> Callback,
+        float Value
         ) : CallbackItem;
 
     internal sealed record SimStringDataRefCb (
-        Action<SimStringDataRef> Callback, 
-        SimStringDataRef Element
+        Action<string> Callback, 
+        string Value
         ) : CallbackItem; 
 
     internal sealed record CommandCb (
-        Action<SimCommand, bool> Callback,
-        SimCommand Element,
+        Action<bool> Callback,
         bool IsActive
         ) : CallbackItem;
 }
