@@ -38,7 +38,7 @@ internal interface IXPlaneApi
     Task<JsonElement> GetDataRefValueAsync(long id, int? index = null, CancellationToken ct = default);
 
     /// <summary>PATCH /datarefs/{id}/value — Sets a dataref value via REST.</summary>
-    Task SetDataRefValueByIdAsync(long id, JsonElement value, int? index = null, CancellationToken ct = default);
+    Task SetDataRefValueByHttpAsync(long id, JsonElement value, int? index = null, CancellationToken ct = default);
 
     /// <summary>WebSocket dataref_set_values — Sets one or more dataref values via WebSocket (faster than REST for frequent updates).</summary>
     Task SetDataRefValuesByWsAsync(IEnumerable<DataRefSetEntry> datarefs);

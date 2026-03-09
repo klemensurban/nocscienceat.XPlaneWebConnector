@@ -1,5 +1,4 @@
 ﻿using Microsoft.Extensions.Logging;
-using nocscienceat.XPlaneWebConnector.Models;
 
 namespace nocscienceat.XPlaneWebConnector;
 
@@ -25,23 +24,11 @@ public sealed partial class XPlaneWebConnector
     {
         try
         {
-            await foreach (CallbackItem callbackItem in _callbacks.Reader.ReadAllAsync(ct))
+            await foreach (Action callback in _callbacks.Reader.ReadAllAsync(ct))
             {
                 try
                 {
-                    // based on callbackItem record type (simulated discriminated union) do appropriate call back
-                    switch (callbackItem)
-                    {
-                        case CallbackItem.SimDataRefCb cb:
-                            cb.Callback(cb.Value);
-                            break;
-                        case CallbackItem.SimStringDataRefCb cb:
-                            cb.Callback(cb.Value);
-                            break;
-                        case CallbackItem.CommandCb cb:
-                            cb.Callback(cb.IsActive);
-                            break;
-                    }
+                    callback();
                 }
                 catch (Exception ex)
                 {

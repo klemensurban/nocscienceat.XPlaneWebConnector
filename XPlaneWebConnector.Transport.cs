@@ -10,8 +10,7 @@ public sealed partial class XPlaneWebConnector
     // ========================================================================
     // WebSocket connection and receive loop
     // ========================================================================
-
-
+    
     /// <summary>
     /// Establishes a WebSocket connection to the X-Plane server and enters a receive loop.
     /// Automatically reconnects on transient failures with a 3-second delay.
@@ -90,7 +89,6 @@ public sealed partial class XPlaneWebConnector
     private async Task ReceiveLoopAsync(CancellationToken ct)
     {
         var buffer = new byte[8192];
-        int counter = 0;
         while (_webSocket?.State == WebSocketState.Open && !ct.IsCancellationRequested)
         {
             var result = await _webSocket.ReceiveAsync(buffer, ct);
@@ -130,13 +128,12 @@ public sealed partial class XPlaneWebConnector
     {
         var pool = System.Buffers.ArrayPool<byte>.Shared;
         var assembled = pool.Rent(buffer.Length * 2);
-        int totalLength = 0;
 
         try
         {
             // Copy first frame data
             buffer.AsSpan(0, firstFrameCount).CopyTo(assembled);
-            totalLength = firstFrameCount;
+            var totalLength = firstFrameCount;
 
             WebSocketReceiveResult result;
             do
@@ -183,7 +180,7 @@ public sealed partial class XPlaneWebConnector
         if (_webSocket?.State != WebSocketState.Open)
             throw new InvalidOperationException("WebSocket is not connected");
 
-        var bytes = JsonSerializer.SerializeToUtf8Bytes(request, typeInfo);
+        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(request, typeInfo);
         await _webSocket.SendAsync(bytes, WebSocketMessageType.Text, true, _cts?.Token ?? CancellationToken.None);
     }
 }

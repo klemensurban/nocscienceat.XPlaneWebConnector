@@ -6,13 +6,15 @@ Provides a high-level interface for subscribing to datarefs, setting dataref val
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+> **⚠️ Breaking changes in v3.x** — see [Breaking Changes](#breaking-changes-from-2x) below.
+
 ## Features
 
-- **WebSocket dataref subscriptions** — receive real-time value updates with callbacks; returns `IDisposable` for per-consumer unsubscription
+- **Typed WebSocket dataref subscriptions** — subscribe with `Action<float>`, `Action<int>`, `Action<double>`, or `Action<string>` callbacks matching the X-Plane dataref type; returns `IDisposable` for per-consumer unsubscription
 - **WebSocket command activation subscriptions** — subscribe to command activation status updates with the same `IDisposable` pattern as datarefs
 - **Disposable subscription handles** — multiple consumers can subscribe to the same dataref or command; disposing a handle removes only that consumer's callback; X-Plane is unsubscribed only when the last consumer disposes
-- **Dataref writes** — set numeric and string datarefs by path or `SimDataRef` instance
-- **Command execution** — send one-shot commands or control begin/end activation, with optional hold duration
+- **Dataref writes** — set `float`, `int`, `double`, and `string` datarefs by path
+- **Command execution** — send one-shot commands by path or control begin/end activation, with optional hold duration
 - **Selectable transport** — choose between WebSocket or HTTP (REST) for commands and dataref writes via `CommandSetDataRefTransport`
 - **Full REST API** — list/query datarefs and commands, read values, manage flights
 - **Automatic reconnection** — recovers from transient WebSocket disconnections
@@ -53,19 +55,17 @@ var httpClientFactory = provider.GetRequiredService<IHttpClientFactory>();
 var connector = new XPlaneWebConnector("localhost", 8086, CommandSetDataRefTransport.WebSocket, fireForgetOnHttpTransport: false, logger, httpClientFactory);
 connector.Start();
 
-// Subscribe to a dataref
-var heading = new SimDataRef { DataRef = "sim/cockpit/autopilot/heading_mag" };
-await connector.SubscribeAsync(heading, dataref =>
+// Subscribe to a float dataref
+await connector.SubscribeAsync("sim/cockpit/autopilot/heading_mag", (float value) =>
 {
-    Console.WriteLine($"Heading: {dataref.Value:F1}°");
+    Console.WriteLine($"Heading: {value:F1}°");
 });
 
 // Set a dataref value
-await connector.SetDataRefValueAsync("sim/cockpit/lights/landing_lights_on", 1f);
+await connector.SetDataRefValueAsync("sim/cockpit/lights/landing_lights_on", 1);
 
 // Send a command
-var cmd = new SimCommand { Command = "sim/autopilot/heading_up" };
-await connector.SendCommandAsync(cmd);
+await connector.SendCommandAsync("sim/autopilot/heading_up");
 
 // Keep running...
 Console.ReadLine();
@@ -90,13 +90,23 @@ The library exposes one public interface, implemented by `XPlaneWebConnector`:
 
 | Type | Description |
 |---|---|
-| `SimDataRef` | Numeric dataref reference — holds the path and the latest `float` value |
-| `SimStringDataRef` | String/data-type dataref reference — holds the path and the latest `string` value |
-| `SimCommand` | Command reference — holds the command path |
 | `CommandSetDataRefTransport` | Enum selecting the transport for commands and dataref writes: `WebSocket` (default) or `Http` |
 | `IXPlaneWebConnectorSettings` | Interface for connector configuration — used with DI registration via `XPlaneWebConnectorSettings` |
 | `XPlaneWebConnectorSettings` | Bindable settings class with property aliases (`IpAddress`/`WebPort`) for flexible config binding |
 | `SubscriptionHandle` | `IDisposable` returned by `SubscribeAsync` / `SubscribeCommandAsync` — disposing removes the consumer's callback and unsubscribes from X-Plane when no consumers remain |
+
+### Supported Dataref Types
+
+The X-Plane API defines several dataref value types. The consumer **must** use the correct `Action<T>` overload matching the dataref's declared type:
+
+| X-Plane `value_type` | C# callback / setter type | Array support |
+|---|---|---|
+| `float` | `Action<float>` / `float` | Scalar and array (`float_array`) |
+| `int` | `Action<int>` / `int` | Scalar and array (`int_array`) |
+| `double` | `Action<double>` / `double` | Scalar only (no `double_array` in X-Plane) |
+| `data` | `Action<string>` / `string` | Scalar only (base64-encoded bytes, no array variant) |
+
+Using the wrong type for a dataref throws an `InvalidOperationException` with a descriptive message.
 
 ## Usage
 
@@ -180,38 +190,51 @@ var connector = new XPlaneWebConnector(
 `SubscribeAsync` returns an `IDisposable` handle. Disposing it removes the consumer's callback; when the last consumer for a dataref disposes, X-Plane is told to stop sending updates.
 
 ```csharp
-var altitude = new SimDataRef { DataRef = "sim/cockpit2/gauges/indicators/altitude_ft_pilot" };
-
-IDisposable sub = await connector.SubscribeAsync(altitude, dataref =>
+IDisposable sub = await connector.SubscribeAsync("sim/cockpit2/gauges/indicators/altitude_ft_pilot", (float value) =>
 {
-    Console.WriteLine($"Altitude: {dataref.Value:F0} ft");
+    Console.WriteLine($"Altitude: {value:F0} ft");
 });
 
 // Later, to unsubscribe this consumer:
 sub.Dispose();
 ```
 
+#### Double Datarefs
+
+Datarefs with `value_type = "double"` use a `double` callback. Double datarefs are scalar only — no array variant exists in X-Plane.
+
+```csharp
+IDisposable sub = await connector.SubscribeAsync("sim/time/total_running_time_sec", (double value) =>
+{
+    Console.WriteLine($"Total time: {value:F3}s");
+});
+```
+
+#### Integer Datarefs
+
+```csharp
+IDisposable sub = await connector.SubscribeAsync("sim/cockpit/electrical/battery_on", (int value) =>
+{
+    Console.WriteLine($"Battery: {(value == 1 ? "ON" : "OFF")}");
+});
+```
+
 #### String Datarefs
 
 ```csharp
-var tailNumber = new SimStringDataRef { DataRef = "sim/aircraft/view/acf_tailnum" };
-
-IDisposable sub = await connector.SubscribeAsync(tailNumber, dataref =>
+IDisposable sub = await connector.SubscribeAsync("sim/aircraft/view/acf_tailnum", (string value) =>
 {
-    Console.WriteLine($"Tail: {dataref.Value}");
+    Console.WriteLine($"Tail: {value}");
 });
 ```
 
 #### Array Datarefs
 
-Subscribe to individual indices using bracket notation:
+Subscribe to individual indices using bracket notation. Only `float` and `int` datarefs support array indices (`float_array`, `int_array`):
 
 ```csharp
-var engine1N1 = new SimDataRef { DataRef = "sim/cockpit2/engine/indicators/N1_percent[0]" };
-var engine2N1 = new SimDataRef { DataRef = "sim/cockpit2/engine/indicators/N1_percent[1]" };
-
-var sub1 = await connector.SubscribeAsync(engine1N1, d => Console.WriteLine($"ENG1 N1: {d.Value:F1}%"));
-var sub2 = await connector.SubscribeAsync(engine2N1, d => Console.WriteLine($"ENG2 N1: {d.Value:F1}%"));
+var sub1 = await connector.SubscribeAsync("sim/cockpit2/engine/indicators/N1_percent[0]", (float value) => Console.WriteLine($"ENG1 N1: {value:F1}%"));
+var sub2 = await connector.SubscribeAsync("sim/cockpit2/engine/indicators/N1_percent[1]", (float value) => Console.WriteLine($"ENG2 N1: {value:F1}%"));
 ```
 
 #### Multi-Consumer Subscriptions
@@ -220,10 +243,10 @@ Multiple panels can subscribe to the same dataref independently:
 
 ```csharp
 // Panel A subscribes
-var subA = await connector.SubscribeAsync(altitude, d => UpdatePanelA(d.Value));
+var subA = await connector.SubscribeAsync("sim/cockpit2/gauges/indicators/altitude_ft_pilot", (float value) => UpdatePanelA(value));
 
 // Panel B subscribes to the same dataref
-var subB = await connector.SubscribeAsync(altitude, d => UpdatePanelB(d.Value));
+var subB = await connector.SubscribeAsync("sim/cockpit2/gauges/indicators/altitude_ft_pilot", (float value) => UpdatePanelB(value));
 
 // Panel A shuts down — Panel B continues receiving updates
 subA.Dispose();
@@ -235,14 +258,16 @@ subB.Dispose();
 ### Setting Dataref Values
 
 ```csharp
-// By path
-await connector.SetDataRefValueAsync("sim/cockpit/lights/landing_lights_on", 1f);
+// Float dataref
+await connector.SetDataRefValueAsync("sim/cockpit/lights/landing_lights_on", 1.0f);
 
-// By SimDataRef instance
-var parkBrake = new SimDataRef { DataRef = "sim/cockpit2/controls/parking_brake_ratio" };
-await connector.SetDataRefValueAsync(parkBrake, 1.0f);
+// Integer dataref
+await connector.SetDataRefValueAsync("sim/cockpit/electrical/battery_on", 1);
 
-// String datarefs
+// Double dataref
+await connector.SetDataRefValueAsync("sim/time/total_running_time_sec", 123.456);
+
+// String dataref
 await connector.SetDataRefValueAsync("sim/aircraft/view/acf_tailnum", "D-ABCD");
 ```
 
@@ -250,24 +275,20 @@ await connector.SetDataRefValueAsync("sim/aircraft/view/acf_tailnum", "D-ABCD");
 
 ```csharp
 // One-shot command (press & immediate release, duration = 0)
-var gearToggle = new SimCommand { Command = "sim/flight_controls/landing_gear_toggle" };
-await connector.SendCommandAsync(gearToggle);
+await connector.SendCommandAsync("sim/flight_controls/landing_gear_toggle");
 
 // Command with a specific hold duration (0–10 seconds)
-var fireTest = new SimCommand { Command = "sim/annunciator/fire_test" };
-await connector.SendCommandAsync(fireTest, duration: 3.0f);
+await connector.SendCommandAsync("sim/annunciator/fire_test", duration: 3.0f);
 ```
 
 ### Subscribing to Command Activation
 
-`SubscribeCommandAsync` follows the same pattern as dataref subscriptions: pass a `SimCommand`, receive an `IDisposable` handle for per-consumer unsubscription.
+`SubscribeCommandAsync` follows the same pattern as dataref subscriptions: pass a command path string, receive an `IDisposable` handle for per-consumer unsubscription.
 
 ```csharp
-var engineMaster = new SimCommand { Command = "toliss_airbus/engcommands/Master1On" };
-
-IDisposable sub = await connector.SubscribeCommandAsync(engineMaster, (cmd, isActive) =>
+IDisposable sub = await connector.SubscribeCommandAsync("toliss_airbus/engcommands/Master1On", isActive =>
 {
-    Console.WriteLine($"Command {cmd.Command}: active={isActive}");
+    Console.WriteLine($"Engine Master 1: active={isActive}");
 });
 
 // Later, to unsubscribe:
@@ -346,8 +367,8 @@ builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
 │                  Your Application                    │
 │                                                      │
 │  IXPlaneWebConnector                                 │
-│   (subscribe, set values,                            │
-│    send commands,                                    │
+│   (subscribe with typed callbacks,                   │
+│    set values, send commands,                        │
 │    availability check)                               │
 └──────────────────────────┬───────────────────────────┘
                            │
@@ -367,16 +388,18 @@ builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
 │                      │  └────────┬────────┘  │       │
 │  ID Caches           │  ┌────────▼────────┐  │       │
 │  ┌─────────────────┐ │  │ Worker         │  │       │
-│  │ DataRef: path→id│ │  │ (JSON parse,   │  │       │
-│  │ Command: path→id│ │  │  dispatch)     │  │       │
-│  └─────────────────┘ │  └────────┬────────┘  │       │
-│                      │  ┌────────▼────────┐  │       │
+│  │ DataRef: path→  │ │  │ (JSON parse,   │  │       │
+│  │   XPlaneDataRef │ │  │  type-aware    │  │       │
+│  │   Info          │ │  │  dispatch)     │  │       │
+│  │ Command: path→id│ │  └────────┬────────┘  │       │
+│  └─────────────────┘ │  ┌────────▼────────┐  │       │
 │                      │  │ _callbacks     │  │       │
+│                      │  │ Channel<Action>│  │       │
 │                      │  └────────┬────────┘  │       │
 │                      │  ┌────────▼────────┐  │       │
 │                      │  │ Callback Task  │  │       │
 │                      │  │ (invokes user  │  │       │
-│                      │  │  callbacks)    │  │       │
+│                      │  │  Action()s)    │  │       │
 │                      │  └─────────────────┘  │       │
 │                      └───────────────────────┘       │
 └──────────────────────────────────────────────────────┘
@@ -392,9 +415,65 @@ builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
 - **Selectable transport** — `CommandSetDataRefTransport` controls whether commands and dataref writes use WebSocket (`command_set_is_active` / `dataref_set_values`) or HTTP REST (`POST /command/{id}/activate` / `PATCH /datarefs/{id}/value`). WebSocket is lower-latency; HTTP provides immediate error feedback.
 - **Fire-and-forget sends** — WebSocket sends never block waiting for acknowledgements. When `fireForgetOnHttpTransport` is enabled, HTTP write operations also return immediately; errors are caught and logged by an async local function without propagating to the caller.
 - **Proper resource disposal** — all `HttpResponseMessage` instances are disposed via `using` declarations to promptly return connections to the pool.
-- **Decoupled three-stage pipeline** — WebSocket frames are read into a bounded `_dataChannel`; the Worker parses JSON and enqueues `CallbackItem` entries into an unbounded `_callbacks` channel; a dedicated callback task invokes consumer callbacks. Slow consumers never stall the Worker or the receive loop.
+- **Decoupled three-stage pipeline** — WebSocket frames are read into a bounded `_dataChannel`; the Worker parses JSON and enqueues `Action` closures (with the dataref value captured) into an unbounded `_callbacks` channel; a dedicated callback task invokes those `Action`s. Slow consumers never stall the Worker or the receive loop.
 - **Lazy ID resolution with caching** — dataref and command names are resolved to session IDs via REST on first use and cached for the lifetime of the connection.
 - **Automatic reconnection** — if the WebSocket connection drops, the connector retries once after 3 seconds before signalling `ConnectionClosed`.
+
+## Breaking Changes from 2.x
+
+Version 3.x introduces significant API changes from the 2.x line. Unlike the "classic" `XPlaneConnector` library (which treated all datarefs as `float`), this version provides full support for X-Plane's native data types (`float`, `int`, `double`, `data`/string). Consumers **must** use the correct C# type matching the X-Plane dataref's `value_type`.
+
+### Removed types
+
+| Removed | Replacement |
+|---|---|
+| `SimDataRef` | Use the dataref path string directly |
+| `SimStringDataRef` | Use the dataref path string directly |
+| `SimCommand` (in connector API) | Use the command path string directly |
+
+> **Note on `SimCommand`:** Consumer-side panels may still use a `SimCommand` helper type internally, but the connector API no longer requires it — all command methods accept plain `string` paths. This asymmetry (datarefs = pure strings, commands = optional panel-side type) is a known simplification.
+
+### Subscription API changes
+
+**Before (2.x):**
+```csharp
+var dr = new SimDataRef { DataRef = "sim/cockpit/heading" };
+await connector.SubscribeAsync(dr, dataref => Use(dataref.Value)); // always float
+
+var cmd = new SimCommand { Command = "sim/autopilot/heading_up" };
+await connector.SendCommandAsync(cmd);
+await connector.SubscribeCommandAsync(cmd, (c, active) => Use(c.Command, active));
+```
+
+**After (3.x):**
+```csharp
+await connector.SubscribeAsync("sim/cockpit/heading", (float value) => Use(value));
+await connector.SubscribeAsync("sim/some/int_dataref", (int value) => Use(value));
+await connector.SubscribeAsync("sim/some/double_dataref", (double value) => Use(value));
+await connector.SubscribeAsync("sim/aircraft/view/acf_tailnum", (string value) => Use(value));
+
+await connector.SendCommandAsync("sim/autopilot/heading_up");
+await connector.SubscribeCommandAsync("toliss_airbus/engcommands/Master1On", isActive => Use(isActive));
+```
+
+### Callback channel changes
+
+The internal callback channel changed from `Channel<CallbackItem>` (a discriminated union with per-type variants) to `Channel<Action>`. The Worker now captures the typed value in a closure (`() => cb(floatValue)`) and enqueues a plain `Action`. The callback task simply invokes `callback()` with no type switching.
+
+### SetDataRefValueAsync changes
+
+`SetDataRefValueAsync` now accepts typed values directly — no wrapper objects:
+
+```csharp
+await connector.SetDataRefValueAsync("path", 1.0f);    // float
+await connector.SetDataRefValueAsync("path", 42);       // int
+await connector.SetDataRefValueAsync("path", 3.14);     // double
+await connector.SetDataRefValueAsync("path", "D-ABCD"); // string
+```
+
+### Type safety
+
+Using the wrong type for a dataref now throws `InvalidOperationException` with a descriptive message (e.g., requesting `float` for a dataref that X-Plane reports as `int`). Array index notation (`[N]`) is validated against the dataref's array support — `double` and `data` types reject indices; `float` and `int` require them for array-type datarefs.
 
 ## Documentation
 

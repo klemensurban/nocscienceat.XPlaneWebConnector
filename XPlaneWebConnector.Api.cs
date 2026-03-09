@@ -21,7 +21,7 @@ public sealed partial class XPlaneWebConnector
         using var response = await _httpClientFactory.CreateClient().GetAsync(_capabilitiesUrl, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        return await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneCapabilitiesResponse, ct);
+        return await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneCapabilitiesResponse, ct);
     }
 
     // ========================================================================
@@ -48,7 +48,7 @@ public sealed partial class XPlaneWebConnector
         using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/datarefs/count", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
+        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
         return result?.Data ?? 0;
     }
 
@@ -58,7 +58,7 @@ public sealed partial class XPlaneWebConnector
         using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/datarefs/{id}/value{indexParam}", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneValueResponse, ct);
+        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneValueResponse, ct);
         return result?.Data ?? default;
     }
 
@@ -66,10 +66,10 @@ public sealed partial class XPlaneWebConnector
     // REST: Dataref writes
     // ========================================================================
 
-    public async Task SetDataRefValueByIdAsync(long id, JsonElement value, int? index = null, CancellationToken ct = default)
+    public async Task SetDataRefValueByHttpAsync(long id, JsonElement value, int? index = null, CancellationToken ct = default)
     {
         var body = new DataRefValueBody { Data = value };
-        var json = JsonSerializer.SerializeToUtf8Bytes(body, Models.XPlaneJsonContext.Default.DataRefValueBody);
+        var json = JsonSerializer.SerializeToUtf8Bytes(body, XPlaneJsonContext.Default.DataRefValueBody);
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
         var indexParam = index.HasValue ? $"?index={index.Value}" : "";
@@ -109,7 +109,7 @@ public sealed partial class XPlaneWebConnector
             Type = "dataref_set_values",
             Params = new DataRefSetValuesParams { Datarefs = [.. datarefs] }
         };
-        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefSetValuesParams);
+        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestDataRefSetValuesParams);
     }
 
     // ========================================================================
@@ -124,7 +124,7 @@ public sealed partial class XPlaneWebConnector
             Type = "dataref_subscribe_values",
             Params = new DataRefSubscribeParams { Datarefs = [.. datarefs] }
         };
-        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
+        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
     }
 
     public async Task UnsubscribeDataRefsAsync(IEnumerable<DataRefSubscribeEntry> datarefs)
@@ -135,7 +135,7 @@ public sealed partial class XPlaneWebConnector
             Type = "dataref_unsubscribe_values",
             Params = new DataRefSubscribeParams { Datarefs = [.. datarefs] }
         };
-        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
+        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestDataRefSubscribeParams);
     }
 
     // ========================================================================
@@ -153,7 +153,7 @@ public sealed partial class XPlaneWebConnector
         using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneListResponseXPlaneCommandInfo, ct);
+        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneListResponseXPlaneCommandInfo, ct);
         return result?.Data ?? [];
     }
 
@@ -162,7 +162,7 @@ public sealed partial class XPlaneWebConnector
         using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/commands/count", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
-        var result = await JsonSerializer.DeserializeAsync(stream, Models.XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
+        var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
         return result?.Data ?? 0;
     }
 
@@ -173,7 +173,7 @@ public sealed partial class XPlaneWebConnector
     public async Task ActivateCommandAsync(long id, float duration = 0, CancellationToken ct = default)
     {
         var body = new CommandActivateBody { Duration = duration };
-        var json = JsonSerializer.SerializeToUtf8Bytes(body, Models.XPlaneJsonContext.Default.CommandActivateBody);
+        var json = JsonSerializer.SerializeToUtf8Bytes(body, XPlaneJsonContext.Default.CommandActivateBody);
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
         if (_fireForgetOnHttpTransport)
@@ -216,7 +216,7 @@ public sealed partial class XPlaneWebConnector
                 Commands = [new CommandSetEntry { Id = id, IsActive = isActive, Duration = duration }]
             }
         };
-        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestCommandSetActiveParams);
+        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandSetActiveParams);
     }
 
     // ========================================================================
@@ -231,7 +231,7 @@ public sealed partial class XPlaneWebConnector
             Type = "command_subscribe_is_active",
             Params = new CommandSubscribeParams { Commands = [.. commandIds.Select(id => new CommandIdEntry { Id = id })] }
         };
-        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
+        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
     }
 
     public async Task UnsubscribeCommandUpdatesAsync(IEnumerable<long> commandIds)
@@ -242,7 +242,7 @@ public sealed partial class XPlaneWebConnector
             Type = "command_unsubscribe_is_active",
             Params = new CommandSubscribeParams { Commands = [.. commandIds.Select(id => new CommandIdEntry { Id = id })] }
         };
-        await SendWebSocketFireAndForgetAsync(request, Models.XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
+        await SendWebSocketFireAndForgetAsync(request, XPlaneJsonContext.Default.WsRequestCommandSubscribeParams);
     }
 
     // ========================================================================
@@ -252,7 +252,7 @@ public sealed partial class XPlaneWebConnector
     public async Task StartFlightAsync(JsonElement flightData, CancellationToken ct = default)
     {
         var body = new FlightBody { Data = flightData };
-        var json = JsonSerializer.SerializeToUtf8Bytes(body, Models.XPlaneJsonContext.Default.FlightBody);
+        var json = JsonSerializer.SerializeToUtf8Bytes(body, XPlaneJsonContext.Default.FlightBody);
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
 
@@ -283,7 +283,7 @@ public sealed partial class XPlaneWebConnector
     public async Task UpdateFlightAsync(JsonElement flightData, CancellationToken ct = default)
     {
         var body = new FlightBody { Data = flightData };
-        var json = JsonSerializer.SerializeToUtf8Bytes(body, Models.XPlaneJsonContext.Default.FlightBody);
+        var json = JsonSerializer.SerializeToUtf8Bytes(body, XPlaneJsonContext.Default.FlightBody);
         var content = new ByteArrayContent(json);
         content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
 

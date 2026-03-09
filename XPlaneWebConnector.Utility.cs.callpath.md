@@ -1,26 +1,26 @@
 ﻿# XPlaneWebConnector.Utility.cs — Call Path Diagram
 
 > **Partial class file:** `XPlaneWebConnector.Utility.cs`
-> **Responsibility:** Pure utility methods — dataRef path parsing and byte-array decoding.
+> **Responsibility:** Pure utility methods — dataRef path parsing.
 > **Thread context:** Static/pure methods — safe to call from any thread.
 
 ---
 
 ## Channel Dataflow — This File's Role
 
-Utility.cs has **no direct channel interaction**. It provides pure helper functions
-used by both sides of the channel pipeline:
+Utility.cs has **no direct channel interaction**. It provides a pure helper function
+used by the consumer-thread side of the pipeline:
 
 ```
-  Consumer thread                              Worker thread
-       │                                            │
-       ├─ SubscribeAsync()                          ├─ DispatchArrayUpdate()
-       │   └─ ParseDataRefPath()  ◄── Utility.cs    │   └─ DecodeByteArrayToString()  ◄── Utility.cs
-       │                                            │
-       ├─ SetDataRefValueAsync()                    │
-       │   └─ ParseDataRefPath()  ◄── Utility.cs    │
-       ▼                                            ▼
-  _commandChannel                              _callbacks
+  Consumer thread
+       │
+       ├─ SubscribeAsync()
+       │   └─ ParseDataRefPath()  ◄── Utility.cs
+       │
+       ├─ SetDataRefValueAsync()
+       │   └─ ParseDataRefPath()  ◄── Utility.cs
+       ▼
+  _commandChannel
 ```
 
 ---
@@ -31,10 +31,6 @@ used by both sides of the channel pipeline:
 ParseDataRefPath(path)                               ── static, pure
   └─ ArrayIndexRegex().Match(path)                   ── source-generated regex
        returns (basePath, index) or (path, -1)
-
-DecodeByteArrayToString(arrayElement)                ── static, pure
-  └─ enumerates JSON array → byte[] → UTF-8 string
-       trims trailing null bytes
 ```
 
 ---
@@ -45,7 +41,6 @@ DecodeByteArrayToString(arrayElement)                ── static, pure
 |---|--------|------|--------|
 | 1 | `ArrayIndexRegex()` | Source-generated regex for `"Foo[7]"` patterns | Any (static) |
 | 2 | `ParseDataRefPath(path)` | Splits `"AirbusFBW/Foo[7]"` → `("AirbusFBW/Foo", 7)` | Any (static) |
-| 3 | `DecodeByteArrayToString(arrayElement)` | JSON byte array → UTF-8 string | Worker thread |
 
 ---
 
@@ -53,5 +48,4 @@ DecodeByteArrayToString(arrayElement)                ── static, pure
 
 | Direction | Source File | Method Called | Purpose |
 |---|---|---|---|
-| **inbound** | ← XPlaneWebConnector.cs | `ParseDataRefPath` | `SubscribeAsync`, `SetDataRefValueAsync` |
-| **inbound** | ← Worker.cs | `DecodeByteArrayToString` | `DispatchArrayUpdate` (string dataRef decoding) |
+| **inbound** | ← XPlaneWebConnector.cs | `ParseDataRefPath` | `SubscribeAsync`, `SetDataRefValueAsync` (via `ResolveAndValidateDataRefAsync`) |

@@ -1,6 +1,4 @@
-﻿using System.Text;
-using System.Text.Json;
-using System.Text.RegularExpressions;
+﻿using System.Text.RegularExpressions;
 
 namespace nocscienceat.XPlaneWebConnector;
 
@@ -29,28 +27,5 @@ public sealed partial class XPlaneWebConnector
     }
 
 
-    /// <summary>
-    /// Converts a JSON array of numeric elements into a UTF-8 decoded string.
-    /// </summary>
-    /// <remarks>
-    /// This method treats each numeric element in the JSON array as a byte value,
-    /// reassembles them into a byte array, and decodes the result as UTF-8 text.
-    /// Automatically trims trailing null bytes (0x00) before decoding.
-    /// If no null terminator is found, the entire byte array is decoded.
-    /// </remarks>
-    /// <param name="arrayElement">A JsonElement representing a JSON array where each element is a numeric byte value.</param>
-    /// <returns>A UTF-8 decoded string with trailing null bytes removed.</returns>
-    private static string DecodeByteArrayToString(JsonElement arrayElement)
-    {
-        // data-type arrays: each element is a byte ? reassemble and decode
-        var bytes = new byte[arrayElement.GetArrayLength()];
-        int i = 0;
-        foreach (var el in arrayElement.EnumerateArray())
-        {
-            bytes[i++] = (byte)el.GetInt32();
-        }
-        // Trim trailing nulls
-        int len = Array.IndexOf(bytes, (byte)0);
-        return Encoding.UTF8.GetString(bytes, 0, len >= 0 ? len : bytes.Length);
-    }
+
 }

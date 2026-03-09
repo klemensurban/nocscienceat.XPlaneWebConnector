@@ -10,16 +10,20 @@
 ## Channel Dataflow — This File's Role
 
 CallbackChannel.cs is the **final stage of the inbound pipeline** — the last hop
-before data reaches the consumer. It reads `_callbacks` and invokes user code.
+before data reaches the consumer. It reads `_callbacks` (`Channel<Action>`) and invokes
+each `Action` closure, which in turn calls the consumer's typed callback with the captured value.
 
 ```
   X-Plane ─► Transport.cs ─► _dataChannel ─► Worker.cs ─► _callbacks ─► CallbackChannel.cs ─► Consumer
-                                                              ▲               │
-                                                              │               │
-                                                         this channel    this file
-                                                         is the only     is the only
-                                                         producer:       consumer:
-                                                         Worker.cs       reads + invokes
+                                                          ▲               │
+                                                          │               │
+                                                     this channel    this file
+                                                     is the only     is the only
+                                                     producer:       consumer:
+                                                     Worker.cs       reads + invokes
+                                                     (captures       Action()
+                                                      value in
+                                                      closure)
 ```
 
 ### End-to-end inbound dataflow (X-Plane → Consumer)
@@ -35,16 +39,16 @@ before data reaches the consumer. It reads `_callbacks` and invokes user code.
        │
        ▼
   Worker.cs:     ProcessIncomingMessage → Dispatch*
-       │         _callbacks.Writer.TryWrite(CallbackItem)
+       │         _callbacks.Writer.TryWrite(() => cb(typedValue))
        ▼
-  ─── _callbacks ─────────────────────────────────────────────
+  ─── _callbacks (Channel<Action>) ─────────────────────────────
        │
        ▼
   CallbackChannel.cs:  ProcessCallbackChannelAsync
-       │               switch on CallbackItem type
+       │               callback()   ──>  invokes the closure
        ▼
-   Consumer callback:   Action<SimDataRef>, Action<SimStringDataRef>, Action<SimCommand,bool>
-       │
+   Consumer callback:   Action<float>, Action<int>, Action<double>, or Action<string>
+       │                (typed value captured in the closure by the Worker)
        ▼
   Panel / application code (e.g. serial port write, UI update)
 ```
@@ -53,7 +57,7 @@ before data reaches the consumer. It reads `_callbacks` and invokes user code.
 
 | Channel | Direction | Method |
 |---|---|---|
-| `_callbacks` | **reads** ← | `ProcessCallbackChannelAsync` — drains all callback items |
+| `_callbacks` (`Channel<Action>`) | **reads** ← | `ProcessCallbackChannelAsync` — drains all Action closures and invokes them |
 
 ---
 
@@ -64,16 +68,11 @@ StartCallbacksAsync(ct)                              ── called from Start() 
   └─ Task.Run →
        ProcessCallbackChannelAsync(ct)
          │
-         └─ await foreach (_callbacks.Reader.ReadAllAsync)
+         └─ await foreach (Action callback in _callbacks.Reader.ReadAllAsync)
               │
-              ├─ CallbackItem.SimDataRefCb
-              │    └─ cb.Callback(cb.Element)          ── user callback (e.g. panel update)
-              │
-              ├─ CallbackItem.SimStringDataRefCb
-              │    └─ cb.Callback(cb.Element)          ── user callback
-              │
-               └─ CallbackItem.CommandCb
-                    └─ cb.Callback(cb.Element, cb.IsActive)  ── user callback
+              └─ callback()                           ── invokes the closure captured by the Worker
+                  │                                      e.g. () => userCallback(floatValue)
+                  └─ user callback executes              (panel update, serial write, etc.)
 ```
 
 ---

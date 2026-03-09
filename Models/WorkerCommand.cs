@@ -9,12 +9,9 @@ internal abstract record WorkerCommand
 {
     private WorkerCommand() { }
 
-    internal sealed record SubscribeNumeric(Guid SubscriptionId, string dataRefPath, long Id, int Index, Action<float> Callback) : WorkerCommand;
+    internal sealed record SubscribeDataRef(Guid SubscriptionId, XPlaneDataRefInfo DataRefInfo, int Index, Delegate Callback) : WorkerCommand;
 
-    internal sealed record SubscribeString(Guid SubscriptionId, string dataRefPath, long Id, int Index, Action<string> Callback) : WorkerCommand;
-
-    internal sealed record SubscribeCommand(
-        Guid SubscriptionId, long Id, SimCommand Element, Action<bool> Callback) : WorkerCommand;
+    internal sealed record SubscribeCommand(Guid SubscriptionId, long Id, string CommandPath, Action<bool> Callback) : WorkerCommand;
 
     internal sealed record UnsubscribeByGuid(Guid SubscriptionId) : WorkerCommand;
 

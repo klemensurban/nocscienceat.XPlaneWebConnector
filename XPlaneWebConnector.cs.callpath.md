@@ -40,7 +40,7 @@ It writes to two channels but never reads from any — consumption happens in ot
 |---|---|---|---|---|
 | `_dataChannel` | `Channel<XPlaneDataMessage>` | Yes (100, DropOldest) | Transport.cs (receive loop) | Worker.cs (HandleData) |
 | `_commandChannel` | `Channel<CommandEnvelope<WorkerCommand, bool>>` | No (unbounded) | This file (SubscribeAsync, StopAsync) | Worker.cs (HandleCommandAsync) |
-| `_callbacks` | `Channel<CallbackItem>` | No (unbounded) | Worker.cs (Dispatch* methods) | CallbackChannel.cs |
+| `_callbacks` | `Channel<Action>` | No (unbounded) | Worker.cs (Dispatch* methods capture value in closure) | CallbackChannel.cs |
 
 ---
 
@@ -52,7 +52,7 @@ XPlaneWebConnector(host, port, ...)
   └─ initializes: _logger, _httpClientFactory, _baseUrl, _wsUrl, _capabilitiesUrl
   └─ initializes channels: _dataChannel, _commandChannel, _callbacks
   └─ initializes caches:   _dataRefIdCache, _reverseDataRefIdCache, _commandIdCache, _reverseCommandIdCache
-  └─ initializes subs:     _subscriptions, _stringSubscriptions, _subscribedIndices, _subscriptionRegistry, _commandSubscriptions
+  └─ initializes subs:     _subscriptions, _subscribedIndices, _subscriptionRegistry, _commandSubscriptions
 
 XPlaneWebConnector(IXPlaneWebConnectorSettings, ILogger, IHttpClientFactory)
   └─ DI-friendly constructor — delegates to the raw-parameter constructor above
@@ -82,24 +82,30 @@ StopAsync()
 ## Public Subscribe API (IXPlaneWebConnector)
 
 Returns `IDisposable` (`SubscriptionHandle`) for per-consumer unsubscription.
+All overloads call `ResolveAndValidateDataRefAsync` which validates type + array support.
 
 ```
-SubscribeAsync(SimDataRef, callback) → IDisposable
-  ├─ ParseDataRefPath()                      ──► Utility.cs
-  ├─ ResolveDataRefIdAsync()                 ── HTTP GET /datarefs  (this file)
-  ├─ Guid.NewGuid()                          ── generates subscription ID
-  ├─ _commandChannel.Writer.SendCommandAsync ──► Worker thread picks up via HandleWorkerCommandAsync
-  │                                                ──► Worker.cs
-  └─ return new SubscriptionHandle(guid)      ── caller disposes to unsubscribe
+SubscribeAsync(string path, Action<float>) → IDisposable
+  ├─ ResolveAndValidateDataRefAsync(path, IsTypeFloat, supportsArrayIndex: true)
+  │    ├─ ParseDataRefPath()                      ──► Utility.cs
+  │    ├─ ResolveDataRefIdAsync()                 ── HTTP GET /datarefs  (this file)
+  │    └─ Validate type check + array index
+  ├─ SubscribeAsyncInternal(path, info, index, onchange)
+  │    ├─ Guid.NewGuid()                          ── generates subscription ID
+  │    ├─ _commandChannel.Writer.SendCommandAsync ──► Worker.cs (HandleWorkerCommandAsync)
+  │    └─ return new SubscriptionHandle(guid)
 
-SubscribeAsync(SimStringDataRef, callback) → IDisposable
-  ├─ ParseDataRefPath()                      ──► Utility.cs
-  ├─ ResolveDataRefIdAsync()                 ── HTTP GET /datarefs  (this file)
-  ├─ Guid.NewGuid()                          ── generates subscription ID
-  ├─ _commandChannel.Writer.SendCommandAsync ──► Worker.cs
-  └─ return new SubscriptionHandle(guid)
+SubscribeAsync(string path, Action<int>) → IDisposable
+  └─ Same flow, validates IsTypeInt, supportsArrayIndex: true
 
-SubscribeCommandAsync(SimCommand, callback) → IDisposable
+SubscribeAsync(string path, Action<double>) → IDisposable
+  └─ Same flow, validates IsTypeDouble, supportsArrayIndex: false
+     (double has no array variant in X-Plane)
+
+SubscribeAsync(string path, Action<string>) → IDisposable
+  └─ Same flow, validates IsTypeData, supportsArrayIndex: false
+
+SubscribeCommandAsync(string commandPath, Action<bool>) → IDisposable
   ├─ ResolveCommandIdAsync()                 ── HTTP GET /commands  (this file)
   ├─ Guid.NewGuid()                          ── generates subscription ID
   ├─ _commandChannel.Writer.SendCommandAsync ──► Worker.cs
@@ -111,19 +117,20 @@ SubscribeCommandAsync(SimCommand, callback) → IDisposable
 ## Set DataRef / Send Command (IXPlaneWebConnector)
 
 ```
-SetDataRefValueAsync(SimDataRef, value)
-  └─ SetDataRefValueAsync(string, float)
+SetDataRefValueAsync(string path, float value)
+  └─ ResolveAndValidateDataRefAsync(path, IsTypeFloat, supportsArrayIndex: true)
        ├─ ParseDataRefPath()                 ──► Utility.cs
        ├─ ResolveDataRefIdAsync()            ── this file
-       └─ HTTP transport: SetDataRefValueByIdAsync()       ──► Api.cs
-          WS transport:   SetDataRefValuesByWsAsync()      ──► Api.cs
-                            └─ SendWebSocketFireAndForgetAsync() ──► Transport.cs
+       └─ SetDataRefValueCoreAsync(info, index, jsonValue)
+            └─ HTTP transport: SetDataRefValueByHttpAsync()    ──► Api.cs
+               WS transport:   SetDataRefValuesByWsAsync()      ──► Api.cs
+                                 └─ SendWebSocketFireAndForgetAsync() ──► Transport.cs
 
-SetDataRefValueAsync(SimStringDataRef, value)
-  └─ SetDataRefValueAsync(string, string)    ── same pattern as above
+SetDataRefValueAsync(string path, int/double/string)
+  └─ Same pattern: validates type, calls SetDataRefValueCoreAsync
 
-SendCommandAsync(SimCommand)
-  └─ SendCommandAsync(SimCommand, duration)
+SendCommandAsync(string commandPath)
+  └─ SendCommandAsync(string, duration)
        ├─ ResolveCommandIdAsync()            ── this file
        └─ HTTP transport: ActivateCommandAsync()           ──► Api.cs
           WS transport:   SetCommandActiveAsync()          ──► Api.cs
@@ -145,7 +152,7 @@ ResolveCommandIdAsync(path)                  ── HTTP GET /commands, caches i
 
 | Target File | Method Called | Trigger |
 |---|---|---|
-| **Api.cs** | `SetDataRefValueByIdAsync`, `SetDataRefValuesByWsAsync` | `SetDataRefValueAsync` |
+| **Api.cs** | `SetDataRefValueByHttpAsync`, `SetDataRefValuesByWsAsync` | `SetDataRefValueAsync` |
 | **Api.cs** | `ActivateCommandAsync`, `SetCommandActiveAsync` | `SendCommandAsync` |
 | **Transport.cs** | `ConnectWebSocketAndReceiveAsync` | `Start()` |
 | **CallbackChannel.cs** | `StartCallbacksAsync` | `Start()` |

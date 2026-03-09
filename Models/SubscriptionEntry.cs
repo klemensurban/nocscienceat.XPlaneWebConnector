@@ -3,7 +3,7 @@ namespace nocscienceat.XPlaneWebConnector.Models;
 /// <summary>
 /// Discriminates which subscription dictionary holds the callback.
 /// </summary>
-internal enum SubscriptionKind { Numeric, String, Command }
+internal enum SubscriptionKind { Data, Command }
 
 /// <summary>
 /// Tracks one consumer's subscription to a specific dataRef or command.
@@ -13,7 +13,7 @@ internal enum SubscriptionKind { Numeric, String, Command }
 /// unsubscribe from X-Plane.
 /// </summary>
 internal sealed record SubscriptionEntry(
-    long DataRefId,
+    long Id,
     int Index,
     SubscriptionKind Kind,
     Delegate Callback);

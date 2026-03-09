@@ -46,7 +46,33 @@ public sealed class XPlaneDataRefInfo
 {
     public long Id { get; init; }
     public string Name { get; init; } = "";
-    public string ValueType { get; init; } = "";
+
+    [JsonPropertyName("value_type")]
+    public string ValueType
+    {
+        get;
+        init
+        {
+            field = value ?? "";
+            string lower = field.ToLowerInvariant();
+            IsTypeInt = lower is "int" or "int_array";
+            IsTypeFloat = lower is "float" or "float_array";
+            IsTypeDouble = lower is "double";
+            IsTypeData = lower is "data";
+            IsArrayType = lower.EndsWith("_array");
+        }
+    } = "";
+
+    [JsonIgnore]
+    public bool IsTypeInt { get; private set; }
+    [JsonIgnore]
+    public bool IsTypeFloat { get; private set; }
+    [JsonIgnore]
+    public bool IsTypeDouble { get; private set; }
+    [JsonIgnore]
+    public bool IsArrayType { get; private set; }
+    [JsonIgnore]
+    public bool IsTypeData { get; private set; }
 }
 
 /// <summary>Command metadata returned by GET /commands.</summary>
