@@ -23,6 +23,7 @@ Provides a high-level interface for subscribing to datarefs, setting dataref val
 - **Connection closed event** — detect when X-Plane shuts down for graceful cleanup
 - **Non-blocking architecture** — WebSocket reads and callback dispatching run on separate tasks; slow consumers never stall the receive loop
 - **Array dataref support** — subscribe to individual indices of array datarefs (e.g. `AirbusFBW/Foo[7]`)
+- **Cache warm-up** — optionally pre-resolve dataref and command IDs at startup via `PreResolveDataRefAsync` / `PreResolveCommandAsync` so the first runtime use avoids a REST round-trip
 
 ## Requirements
 
@@ -297,6 +298,34 @@ sub.Dispose();
 
 Multiple consumers can subscribe to the same command independently — the same ref-counted unsubscription logic applies as with datarefs.
 
+### Cache Warm-Up (Optional)
+
+The first time any dataref or command path is used, the connector resolves it to an X-Plane session ID via a REST call. `SubscribeAsync` already does this during setup, so **subscribed datarefs are pre-cached**. However, datarefs only used with `SetDataRefValueAsync` and commands used with `SendCommandAsync` are resolved lazily — the first button press or toggle switch incurs a REST round-trip.
+
+`PreResolveDataRefAsync` and `PreResolveCommandAsync` let you warm up the cache during startup:
+
+```csharp
+// Pre-resolve commands so first button press is instant
+await connector.PreResolveCommandAsync("sim/autopilot/heading_up");
+await connector.PreResolveCommandAsync("sim/flight_controls/landing_gear_toggle");
+
+// Pre-resolve write-only datarefs (never subscribed, only written to)
+await connector.PreResolveDataRefAsync("sim/cockpit/lights/landing_lights_on");
+```
+
+Both methods are no-ops if the path is already cached. They support array notation (e.g. `"sim/foo[3]"`).
+
+For bulk warm-up, resolve in parallel:
+
+```csharp
+await Task.WhenAll(
+    connector.PreResolveCommandAsync("sim/autopilot/heading_up"),
+    connector.PreResolveCommandAsync("sim/autopilot/heading_down"),
+    connector.PreResolveDataRefAsync("sim/cockpit/lights/landing_lights_on"),
+    connector.PreResolveDataRefAsync("sim/cockpit/lights/beacon_lights_on")
+);
+```
+
 ### Detecting Connection Loss
 
 ```csharp
@@ -384,22 +413,22 @@ builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
 │  │  • Resolve IDs│   │  └────────┬────────┘  │       │
 │  │  • Query APIs │   │           │           │       │
 │  │               │   │  ┌────────▼────────┐  │       │
-│  └───────────────┘   │  │ _dataChannel   │  │       │
+│  └───────────────┘   │  │ _dataChannel    │  │       │
 │                      │  └────────┬────────┘  │       │
 │  ID Caches           │  ┌────────▼────────┐  │       │
-│  ┌─────────────────┐ │  │ Worker         │  │       │
-│  │ DataRef: path→  │ │  │ (JSON parse,   │  │       │
-│  │   XPlaneDataRef │ │  │  type-aware    │  │       │
-│  │   Info          │ │  │  dispatch)     │  │       │
+│  ┌─────────────────┐ │  │ Worker          │  │       │
+│  │ DataRef: path→  │ │  │ (JSON parse,    │  │       │
+│  │   XPlaneDataRef │ │  │  type-aware     │  │       │
+│  │   Info          │ │  │  dispatch)      │  │       │
 │  │ Command: path→id│ │  └────────┬────────┘  │       │
 │  └─────────────────┘ │  ┌────────▼────────┐  │       │
-│                      │  │ _callbacks     │  │       │
-│                      │  │ Channel<Action>│  │       │
+│                      │  │ _callbacks      │  │       │
+│                      │  │ Channel<Action> │  │       │
 │                      │  └────────┬────────┘  │       │
 │                      │  ┌────────▼────────┐  │       │
-│                      │  │ Callback Task  │  │       │
-│                      │  │ (invokes user  │  │       │
-│                      │  │  Action()s)    │  │       │
+│                      │  │ Callback Task   │  │       │
+│                      │  │ (invokes user   │  │       │
+│                      │  │  Action()s)     │  │       │
 │                      │  └─────────────────┘  │       │
 │                      └───────────────────────┘       │
 └──────────────────────────────────────────────────────┘
@@ -416,7 +445,7 @@ builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
 - **Fire-and-forget sends** — WebSocket sends never block waiting for acknowledgements. When `fireForgetOnHttpTransport` is enabled, HTTP write operations also return immediately; errors are caught and logged by an async local function without propagating to the caller.
 - **Proper resource disposal** — all `HttpResponseMessage` instances are disposed via `using` declarations to promptly return connections to the pool.
 - **Decoupled three-stage pipeline** — WebSocket frames are read into a bounded `_dataChannel`; the Worker parses JSON and enqueues `Action` closures (with the dataref value captured) into an unbounded `_callbacks` channel; a dedicated callback task invokes those `Action`s. Slow consumers never stall the Worker or the receive loop.
-- **Lazy ID resolution with caching** — dataref and command names are resolved to session IDs via REST on first use and cached for the lifetime of the connection.
+- **Lazy ID resolution with caching** — dataref and command names are resolved to session IDs via REST on first use and cached for the lifetime of the connection. For latency-sensitive scenarios, `PreResolveDataRefAsync` / `PreResolveCommandAsync` allow eager resolution at startup.
 - **Automatic reconnection** — if the WebSocket connection drops, the connector retries once after 3 seconds before signalling `ConnectionClosed`.
 
 ## Breaking Changes from 2.x

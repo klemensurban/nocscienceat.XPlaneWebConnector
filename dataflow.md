@@ -99,9 +99,9 @@ The two interfaces are implemented by a single class (`XPlaneWebConnector`) but 
  │ SendCommandAsync(,dur)  │  │ SubscribeDataRefsAsync() │
  │ Dispose()               │  │ UnsubscribeDataRefsAs()  │
  └─────────────────────────┘  │ UnsubscribeAllDataRefs() │
-                               │ Subscribe/Unsub CmdUpd() │
-                               │ SetCommandActiveAsync()  │
-                               └──────────────────────────┘
+                              │ Subscribe/Unsub CmdUpd() │
+                              │ SetCommandActiveAsync()  │
+                              └──────────────────────────┘
 ```
 
 ### When to use which interface
@@ -250,37 +250,37 @@ There are four outbound paths, each with a different protocol and purpose.
 ### 5.1 Subscribe to Dataref (High-Level)
 
 ```
-Consumer                         Library                                      X-Plane
-   │                                │                                            │
-   │ SubscribeAsync(path, Action<T>)│                                            │
-   │───────────────────────────────>│                                            │
-   │                                │                                            │
-   │                                │  ResolveAndValidateDataRefAsync(path)      │
-   │                                │  ├─ ParseDataRefPath("AirbusFBW/Foo[7]")   │
-   │                                │  │  → basePath="AirbusFBW/Foo", index=7    │
-   │                                │  ├─ ResolveDataRefIdAsync(basePath)        │
+Consumer                         Library                                       X-Plane
+   │                                │                                             │
+   │ SubscribeAsync(path, Action<T>)│                                             │
+   │───────────────────────────────>│                                             │
+   │                                │                                             │
+   │                                │  ResolveAndValidateDataRefAsync(path)       │
+   │                                │  ├─ ParseDataRefPath("AirbusFBW/Foo[7]")    │
+   │                                │  │  → basePath="AirbusFBW/Foo", index=7     │
+   │                                │  ├─ ResolveDataRefIdAsync(basePath)         │
    │                                │  │  ├─ cache hit? → return XPlaneDataRefInfo│
-   │                                │  │  └─ cache miss:                         │
-   │                                │  │     GET /api/v3/datarefs                │
-   │                                │  │       ?filter[name]=AirbusFBW/Foo ─────>│
-   │                                │  │     ← { data: [{ id: 42, ...}] } ───────│
-   │                                │  │     cache[path] = XPlaneDataRefInfo     │
-   │                                │  └─ Validate: type check + array support   │
-   │                                │                                            │
+   │                                │  │  └─ cache miss:                          │
+   │                                │  │     GET /api/v3/datarefs                 │
+   │                                │  │       ?filter[name]=AirbusFBW/Foo ──────>│
+   │                                │  │     ← { data: [{ id: 42, ...}] } ────────│
+   │                                │  │     cache[path] = XPlaneDataRefInfo      │
+   │                                │  └─ Validate: type check + array support    │
+   │                                │                                             │
    │                                │  _commandChannel → Worker thread:           │
-   │                                │    RegisterSubscription<T>(guid, info, 7,  │
-   │                                │      Action<T>)                            │
-   │                                │    _subscriptions[(42, 7)] =               │
-   │                                │      SubscriptionCallbacks<T>              │
-   │                                │    _subscribedIndices[42].Add(7)           │
-   │                                │    _subscriptionRegistry[guid] = entry     │
-   │                                │                                            │
-   │                                │  WS → { req_id: N,                         │
-   │                                │         type: "dataref_subscribe_values",  │
-   │                                │         params: { datarefs: [              │
-   │                                │           { id: 42, index: 7 }             │
-   │                                │         ]}} ──────────────────────────────>│
-   │                                │                                            │
+   │                                │    RegisterSubscription<T>(guid, info, 7,   │
+   │                                │      Action<T>)                             │
+   │                                │    _subscriptions[(42, 7)] =                │
+   │                                │      SubscriptionCallbacks<T>               │
+   │                                │    _subscribedIndices[42].Add(7)            │
+   │                                │    _subscriptionRegistry[guid] = entry      │
+   │                                │                                             │
+   │                                │  WS → { req_id: N,                          │
+   │                                │         type: "dataref_subscribe_values",   │
+   │                                │         params: { datarefs: [               │
+   │                                │           { id: 42, index: 7 }              │
+   │                                │         ]}} ───────────────────────────────>│
+   │                                │                                             │
 ```
 
 ### 5.1b Subscribe to Command Activation (High-Level)
@@ -355,11 +355,11 @@ Consumer                                 Library                          X-Plan
    │                                        │  → id (from cache or REST)     │
    │                                        │                                │
    │                                        │  SetDataRefValueByIdAsync()    │
-   │                                        │  ├─ [fireForget=false]          │
+   │                                        │  ├─ [fireForget=false]         │
    │                                        │  │  PATCH /datarefs/42/value   │
    │                                        │  │    ?index=3                 │
    │                                        │  │  ───────────────────────>   │
-   │                                        │  │  ←── 200 OK ───────────────│
+   │                                        │  │  ←── 200 OK ────────────────│
    │                                        │  │                             │
    │                                        │  └─ [fireForget=true]          │
    │                                        │     _ = FireAndForgetAsync()   │
@@ -379,22 +379,22 @@ The `SendCommandAsync(path, duration)` overload allows holding the command for 0
 #### Transport: WebSocket (default)
 
 ```
-Consumer                                Library                          X-Plane
-   │                                       │                                │
+Consumer                                 Library                          X-Plane
+   │                                        │                                │
    │ SendCommandAsync("sim/.../gear_toggle")│                                │
-   │──────────────────────────────────────>│                                │
-   │                                       │  ResolveCommandIdAsync(name)   │
-   │                                       │  → id (from cache or REST)     │
-   │                                       │                                │
-   │                                       │  WS → { req_id: N,             │
-   │                                       │         type: "command_set_    │
-   │                                       │               is_active",      │
-   │                                       │         params: { commands: [  │
-   │                                       │           { id: 100,           │
-   │                                       │             is_active: true,   │
-   │                                       │             duration: 0 }      │
-   │                                       │         ]}} ──────────────────>│
-   │                                       │                                │
+   │───────────────────────────────────────>│                                │
+   │                                        │  ResolveCommandIdAsync(name)   │
+   │                                        │  → id (from cache or REST)     │
+   │                                        │                                │
+   │                                        │  WS → { req_id: N,             │
+   │                                        │         type: "command_set_    │
+   │                                        │               is_active",      │
+   │                                        │         params: { commands: [  │
+   │                                        │           { id: 100,           │
+   │                                        │             is_active: true,   │
+   │                                        │             duration: 0 }      │
+   │                                        │         ]}} ──────────────────>│
+   │                                        │                                │
 ```
 
 #### Transport: Http
@@ -408,11 +408,11 @@ Consumer                                Library                          X-Plane
    │                                       │  → id (from cache or REST)     │
    │                                       │                                │
    │                                       │  ActivateCommandAsync()        │
-   │                                       │  ├─ [fireForget=false]          │
+   │                                       │  ├─ [fireForget=false]         │
    │                                       │  │  POST /command/100/activate │
-   │                                       │  │  Body: { "duration": 0.5 }   │
+   │                                       │  │  Body: { "duration": 0.5 }  │
    │                                       │  │  ──────────────────────>    │
-   │                                       │  │  ←── 200 OK ──────────────│
+   │                                       │  │  ←── 200 OK ────────────────│
    │                                       │  │                             │
    │                                       │  └─ [fireForget=true]          │
    │                                       │     _ = FireAndForgetAsync()   │
@@ -425,7 +425,7 @@ Consumer                                Library                          X-Plane
 ```
   ┌─────────────────────────────────────────────────────────────────────────┐
   │                    Outbound Data Paths                                  │
-  │    (transport selected by CommandSetDataRefTransport)                    │
+  │    (transport selected by CommandSetDataRefTransport)                   │
   ├─────────────────────────────────────────────────────────────────────────┤
   │                                                                         │
   │ Consumer ──> IXPlaneWebConnector                                        │
@@ -441,14 +441,14 @@ Consumer                                Library                          X-Plane
   │              ├── SetDataRefValueAsync()                                 │
   │              │     ├─ ResolveDataRefIdAsync() ──── REST GET ──> X-Plane │
   │              │     ├─ [WebSocket]  SetDataRefValuesByWsAsync() ─ WS ──> │
-  │              │     └─ [Http]       SetDataRefValueByHttpAsync()          │
-  │              │                      └─ PATCH /datarefs/{id}/value ──>  │
+  │              │     └─ [Http]       SetDataRefValueByHttpAsync()         │
+  │              │                      └─ PATCH /datarefs/{id}/value ───>  │
   │              │                                                          │
   │              └── SendCommandAsync()                                     │
   │                    ├─ ResolveCommandIdAsync() ──── REST GET ──> X-Plane │
   │                    ├─ [WebSocket]  SetCommandActiveAsync() ── WS ────>  │
   │                    └─ [Http]       ActivateCommandAsync()               │
-  │                                    └─ POST /command/{id}/activate ──>  │
+  │                                    └─ POST /command/{id}/activate ───>  │
   │                                                                         │
   │ Consumer ──> IXPlaneApi                                                 │
   │              │                                                          │
@@ -537,7 +537,7 @@ X-Plane                    Library                                      Consumer
    │                          │  └─────────────────────────────────────┘   │
    │                          │                        │                   │
    │                          │                        ▼                   │
-   │                          │            Action() → cb(typedValue) ────>│
+   │                          │            Action() → cb(typedValue) ─────>│
    │                          │                                            │
 ```
 
@@ -657,15 +657,15 @@ X-Plane's WebSocket API uses numeric session IDs, not string paths. The library 
 │                                  └─────────────────────────┘        │
 │                                               │                     │
 │                                               ▼                     │
-│                                  ┌──────────────────────────┐       │
-│                                  │ Parse response:          │       │
-│                                  │ { data: [{ id: 42,       │       │
-│                                  │   value_type: "float" }] }│       │
-│                                  │                          │       │
-│                                  │ _dataRefIdCache[path] =  │       │
-│                                  │   XPlaneDataRefInfo      │       │
-│                                  │ return info              │       │
-│                                  └──────────────────────────┘       │
+│                                  ┌───────────────────────────┐      │
+│                                  │ Parse response:           │      │
+│                                  │ { data: [{ id: 42,        │      │
+│                                  │   value_type: "float" }] }│      │
+│                                  │                           │      │
+│                                  │ _dataRefIdCache[path] =   │      │
+│                                  │   XPlaneDataRefInfo       │      │
+│                                  │ return info               │      │
+│                                  └───────────────────────────┘      │
 │                                                                     │
 │  Same flow for _commandIdCache via ResolveCommandIdAsync()          │
 │  (commands cache only the long id, not a metadata object)           │
@@ -686,56 +686,56 @@ X-Plane's WebSocket API uses numeric session IDs, not string paths. The library 
 ## 8. Threading Model & Concurrency
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                       Thread / Task Map                             │
-├─────────────────────────────────────────────────────────────────────┤
-│                                                                     │
-│  Task 1: ConnectWebSocketAndReceiveAsync  (background, long-lived)  │
-│  ├── Owns the ClientWebSocket lifecycle                             │
-│  ├── Runs ReceiveLoopAsync in a tight loop                          │
-│  ├── Handles reconnection on failure                                │
-│  └── Writes raw byte[] into _dataChannel                            │
-│                                                                     │
-│  Task 2: Worker (HandleData + HandleCommandAsync)  (long-lived)     │
-│  ├── Reads from _dataChannel and _commandChannel                    │
-│  ├── Parses JSON and dispatches to subscription dictionaries        │
-│  ├── Enqueues Action closures into _callbacks channel (non-blocking) │
-│  └── Never blocked by slow consumer callbacks                       │
-│                                                                     │
-│  Task 3: StartCallbacksAsync  (background, long-lived)             │
-│  ├── Reads from _callbacks channel                                  │
-│  ├── Invokes consumer callbacks sequentially                        │
-│  └── A slow callback blocks other callbacks, but NOT the Worker     │
-│      → Consumers with heavy processing should offload to own queue  │
-│                                                                     │
-│  Consumer thread(s): Any thread calling the API                     │
-│  ├── SubscribeAsync, SetDataRefValueAsync, SendCommandAsync         │
-│  ├── ID caches use ConcurrentDictionary (cross-thread access)       │
-│  └── WebSocket sends are serialized by the runtime                  │
-│                                                                     │
-│  Shared state (ConcurrentDictionary, cross-thread):                 │
-│  ├── _dataRefIdCache           (path → XPlaneDataRefInfo)             │
-│  ├── _reverseDataRefIdCache    (id → path)                          │
-│  ├── _commandIdCache           (path → id)                          │
-│  └── _reverseCommandIdCache    (id → path)                          │
-│                                                                     │
-│  Worker-thread-only state (no cross-thread access):                 │
-│  ├── _subscriptions            ((id, index) → SubscriptionCallbacks) │
-│  │   └─ Polymorphic: SubscriptionCallbacks<float>, <int>,            │
-│  │      <double>, or <string> depending on dataref type              │
-│  ├── _subscribedIndices        (id → SortedSet<int>)                │
+┌────────────────────────────────────────────────────────────────────────┐
+│                       Thread / Task Map                                │
+├────────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  Task 1: ConnectWebSocketAndReceiveAsync  (background, long-lived)     │
+│  ├── Owns the ClientWebSocket lifecycle                                │
+│  ├── Runs ReceiveLoopAsync in a tight loop                             │
+│  ├── Handles reconnection on failure                                   │
+│  └── Writes raw byte[] into _dataChannel                               │
+│                                                                        │
+│  Task 2: Worker (HandleData + HandleCommandAsync)  (long-lived)        │
+│  ├── Reads from _dataChannel and _commandChannel                       │
+│  ├── Parses JSON and dispatches to subscription dictionaries           │
+│  ├── Enqueues Action closures into _callbacks channel (non-blocking)   │
+│  └── Never blocked by slow consumer callbacks                          │
+│                                                                        │
+│  Task 3: StartCallbacksAsync  (background, long-lived)                 │
+│  ├── Reads from _callbacks channel                                     │
+│  ├── Invokes consumer callbacks sequentially                           │
+│  └── A slow callback blocks other callbacks, but NOT the Worker        │
+│      → Consumers with heavy processing should offload to own queue     │
+│                                                                        │
+│  Consumer thread(s): Any thread calling the API                        │
+│  ├── SubscribeAsync, SetDataRefValueAsync, SendCommandAsync            │
+│  ├── ID caches use ConcurrentDictionary (cross-thread access)          │
+│  └── WebSocket sends are serialized by the runtime                     │
+│                                                                        │
+│  Shared state (ConcurrentDictionary, cross-thread):                    │
+│  ├── _dataRefIdCache           (path → XPlaneDataRefInfo)              │
+│  ├── _reverseDataRefIdCache    (id → path)                             │
+│  ├── _commandIdCache           (path → id)                             │
+│  └── _reverseCommandIdCache    (id → path)                             │
+│                                                                        │
+│  Worker-thread-only state (no cross-thread access):                    │
+│  ├── _subscriptions            ((id, index) → SubscriptionCallbacks)   │
+│  │   └─ Polymorphic: SubscriptionCallbacks<float>, <int>,              │
+│  │      <double>, or <string> depending on dataref type                │
+│  ├── _subscribedIndices        (id → SortedSet<int>)                   │
 │  ├── _commandSubscriptions     (id → (commandPath, List<Action<bool>>))│
-│  └── _subscriptionRegistry     (Guid → SubscriptionEntry)           │
-│                                                                     │
-│  Channel<XPlaneDataMessage> _dataChannel:                          │
-│  ├── Bounded(100), DropOldest                                       │
-│  ├── SingleReader = true (Worker reads via HandleData)              │
-│  └── Writer: ReceiveLoopAsync (single writer in practice)           │
-│                                                                     │
-│  int _nextReqId:                                                    │
-│  └── Incremented atomically via Interlocked.Increment               │
-│                                                                     │
-└─────────────────────────────────────────────────────────────────────┘
+│  └── _subscriptionRegistry     (Guid → SubscriptionEntry)              │
+│                                                                        │
+│  Channel<XPlaneDataMessage> _dataChannel:                              │
+│  ├── Bounded(100), DropOldest                                          │
+│  ├── SingleReader = true (Worker reads via HandleData)                 │
+│  └── Writer: ReceiveLoopAsync (single writer in practice)              │
+│                                                                        │
+│  int _nextReqId:                                                       │
+│  └── Incremented atomically via Interlocked.Increment                  │
+│                                                                        │
+└────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Why three tasks?
@@ -922,13 +922,13 @@ X-Plane                   Library                 OvhPanelHandler              H
    │ { "42": 1.0 }           │                         │                          │
    │────────────────────────>│                         │                          │
    │                         │ ReceiveLoop             │                          │
-   │                         │  → _dataChannel          │                          │
-   │                         │  → Worker.HandleData     │                          │
-   │                         │  → DispatchScalar        │                          │
+   │                         │  → _dataChannel         │                          │
+   │                         │  → Worker.HandleData    │                          │
+   │                         │  → DispatchScalar       │                          │
    │                         │    (id=42, val=1.0)     │                          │
-   │                         │  → _callbacks channel    │                          │
-   │                         │    (() => cb(1.0f))      │                          │
-   │                         │  → CallbackTask          │                          │
+   │                         │  → _callbacks channel   │                          │
+   │                         │    (() => cb(1.0f))     │                          │
+   │                         │  → CallbackTask         │                          │
    │                         │                         │                          │
    │                         │ callback(1.0f)          │                          │
    │                         │────────────────────────>│                          │
@@ -963,12 +963,12 @@ Hardware              OvhPanelHandler               Library                    X
    │                         │ HandleK02_ApuMaster(1)  │                          │
    │                         │ → _connector            │                          │
    │                         │   .SendCommandAsync(    │                          │
-   │                         │     "toliss/.../Apu")    │                          │
+   │                         │     "toliss/.../Apu")   │                          │
    │                         │────────────────────────>│                          │
    │                         │                         │ ResolveCommandIdAsync    │
    │                         │                         │ → cache hit (id=100)     │
    │                         │                         │                          │
-   │                         │                         │ [WebSocket transport]     │
+   │                         │                         │ [WebSocket transport]    │
    │                         │                         │ WS: command_set_is_      │
    │                         │                         │     active               │
    │                         │                         │ { id: 100,               │

@@ -89,5 +89,24 @@ public interface IXPlaneWebConnector : IDisposable
     /// X-Plane is unsubscribed only when the last consumer disposes.
     /// </summary>
     Task<IDisposable> SubscribeCommandAsync(string commandPath, Action<bool> onUpdate);
+
+    // ========================================================================
+    // Cache warm-up (optional, for latency-sensitive startup)
+    // ========================================================================
+
+    /// <summary>
+    /// Pre-resolves a dataref path to its X-Plane session ID and caches the result.
+    /// Subsequent calls to <see cref="SubscribeAsync"/> or <see cref="SetDataRefValueAsync"/>
+    /// for this path will use the cached ID instead of making a REST call.
+    /// No-op if already cached. Supports array notation (e.g. <c>"sim/foo[3]"</c>).
+    /// </summary>
+    Task PreResolveDataRefAsync(string dataRefPath);
+
+    /// <summary>
+    /// Pre-resolves a command path to its X-Plane session ID and caches the result.
+    /// Subsequent calls to <see cref="SendCommandAsync"/> for this path will use the
+    /// cached ID instead of making a REST call. No-op if already cached.
+    /// </summary>
+    Task PreResolveCommandAsync(string commandPath);
 }
 

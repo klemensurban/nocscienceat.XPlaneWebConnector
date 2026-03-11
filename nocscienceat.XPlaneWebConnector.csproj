@@ -9,12 +9,14 @@
       <IncludeSymbols>true</IncludeSymbols>
       <SymbolPackageFormat>snupkg</SymbolPackageFormat>
       <PackageId>nocscienceat.XPlaneWebConnector</PackageId>
-      <Version>3.0.0</Version>
-      <Authors>nocscienceat</Authors>
+      <Version>3.1.0</Version>
+      <Authors>nocscienceat, Klemens Urban</Authors>
       <Description>A connector for the XPlane Web API</Description>
       <PackageLicenseExpression>MIT</PackageLicenseExpression>
-      <Copyright>Copyright (c) nocscienceat, Claude Opus 4.6</Copyright>
+      <Copyright>Copyright (c) nocscienceat</Copyright>
       <PackageReadmeFile>README.md</PackageReadmeFile>
+      <RepositoryUrl>https://github.com/klemensurban/nocscienceat.XPlaneWebConnector</RepositoryUrl>
+      <RepositoryType>git</RepositoryType>
     </PropertyGroup>
 
   <ItemGroup>

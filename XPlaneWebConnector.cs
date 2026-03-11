@@ -391,6 +391,21 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     }
 
     // ========================================================================
+    // IXPlaneWebConnector: Cache warm-up
+    // ========================================================================
+
+    public async Task PreResolveDataRefAsync(string dataRefPath)
+    {
+        var (basePath, _) = ParseDataRefPath(dataRefPath);
+        await ResolveDataRefIdAsync(basePath);
+    }
+
+    public async Task PreResolveCommandAsync(string commandPath)
+    {
+        await ResolveCommandIdAsync(commandPath);
+    }
+
+    // ========================================================================
     // IDisposable
     // ========================================================================
 
