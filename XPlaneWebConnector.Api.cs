@@ -18,7 +18,7 @@ public sealed partial class XPlaneWebConnector
 
     public async Task<XPlaneCapabilitiesResponse?> GetCapabilitiesAsync(CancellationToken ct = default)
     {
-        using var response = await _httpClientFactory.CreateClient().GetAsync(_capabilitiesUrl, ct);
+        using var response = await CreateHttpClient().GetAsync(_capabilitiesUrl, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         return await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneCapabilitiesResponse, ct);
@@ -36,7 +36,7 @@ public sealed partial class XPlaneWebConnector
         CancellationToken ct = default)
     {
         var url = BuildQueryUrl($"{_baseUrl}/datarefs", filterNames, start, limit, fields);
-        using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
+        using var response = await CreateHttpClient().GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneListResponseXPlaneDataRefInfo, ct);
@@ -45,7 +45,7 @@ public sealed partial class XPlaneWebConnector
 
     public async Task<int> GetDataRefCountAsync(CancellationToken ct = default)
     {
-        using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/datarefs/count", ct);
+        using var response = await CreateHttpClient().GetAsync($"{_baseUrl}/datarefs/count", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
@@ -55,7 +55,7 @@ public sealed partial class XPlaneWebConnector
     public async Task<JsonElement> GetDataRefValueAsync(long id, int? index = null, CancellationToken ct = default)
     {
         var indexParam = index.HasValue ? $"?index={index.Value}" : "";
-        using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/datarefs/{id}/value{indexParam}", ct);
+        using var response = await CreateHttpClient().GetAsync($"{_baseUrl}/datarefs/{id}/value{indexParam}", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneValueResponse, ct);
@@ -94,7 +94,7 @@ public sealed partial class XPlaneWebConnector
         using var response = await SendAsync();
         response.EnsureSuccessStatusCode();
 
-        Task<HttpResponseMessage> SendAsync() => _httpClientFactory.CreateClient().PatchAsync($"{_baseUrl}/datarefs/{id}/value{indexParam}", content, ct);
+        Task<HttpResponseMessage> SendAsync() => CreateHttpClient().PatchAsync($"{_baseUrl}/datarefs/{id}/value{indexParam}", content, ct);
     }
 
     // ========================================================================
@@ -150,7 +150,7 @@ public sealed partial class XPlaneWebConnector
         CancellationToken ct = default)
     {
         var url = BuildQueryUrl($"{_baseUrl}/commands", filterNames, start, limit, fields);
-        using var response = await _httpClientFactory.CreateClient().GetAsync(url, ct);
+        using var response = await CreateHttpClient().GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneListResponseXPlaneCommandInfo, ct);
@@ -159,7 +159,7 @@ public sealed partial class XPlaneWebConnector
 
     public async Task<int> GetCommandCountAsync(CancellationToken ct = default)
     {
-        using var response = await _httpClientFactory.CreateClient().GetAsync($"{_baseUrl}/commands/count", ct);
+        using var response = await CreateHttpClient().GetAsync($"{_baseUrl}/commands/count", ct);
         response.EnsureSuccessStatusCode();
         await using var stream = await response.Content.ReadAsStreamAsync(ct);
         var result = await JsonSerializer.DeserializeAsync(stream, XPlaneJsonContext.Default.XPlaneScalarResponseInt32, ct);
@@ -198,7 +198,7 @@ public sealed partial class XPlaneWebConnector
         using var response = await SendAsync();
         response.EnsureSuccessStatusCode();
 
-        Task<HttpResponseMessage> SendAsync() => _httpClientFactory.CreateClient().PostAsync($"{_baseUrl}/command/{id}/activate", content);
+        Task<HttpResponseMessage> SendAsync() => CreateHttpClient().PostAsync($"{_baseUrl}/command/{id}/activate", content);
     }
 
     // ========================================================================
@@ -277,7 +277,7 @@ public sealed partial class XPlaneWebConnector
         using var response = await SendAsync();
         response.EnsureSuccessStatusCode();
 
-        Task<HttpResponseMessage> SendAsync() => _httpClientFactory.CreateClient().PostAsync($"{_baseUrl}/flight", content, ct);
+        Task<HttpResponseMessage> SendAsync() => CreateHttpClient().PostAsync($"{_baseUrl}/flight", content, ct);
     }
 
     public async Task UpdateFlightAsync(JsonElement flightData, CancellationToken ct = default)
@@ -308,7 +308,7 @@ public sealed partial class XPlaneWebConnector
         using var response = await SendAsync();
         response.EnsureSuccessStatusCode();
 
-        Task<HttpResponseMessage> SendAsync() => _httpClientFactory.CreateClient().PatchAsync($"{_baseUrl}/flight", content, ct);
+        Task<HttpResponseMessage> SendAsync() => CreateHttpClient().PatchAsync($"{_baseUrl}/flight", content, ct);
     }
 
     // ========================================================================

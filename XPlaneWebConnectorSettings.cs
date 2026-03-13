@@ -48,4 +48,10 @@ public class XPlaneWebConnectorSettings : IXPlaneWebConnectorSettings
     /// Maximum readiness probe retries. <c>0</c> = unlimited.
     /// </summary>
     public int ReadinessProbeMaxRetries { get; set; } = 0;
+
+    /// <summary>
+    /// Named <see cref="System.Net.Http.IHttpClientFactory"/> client to use.
+    /// Default: <c>""</c> (the default client).
+    /// </summary>
+    public string HttpClientName { get; set; } = string.Empty;
 }

@@ -9,7 +9,7 @@
       <IncludeSymbols>true</IncludeSymbols>
       <SymbolPackageFormat>snupkg</SymbolPackageFormat>
       <PackageId>nocscienceat.XPlaneWebConnector</PackageId>
-      <Version>3.1.0</Version>
+      <Version>3.2.0</Version>
       <Authors>nocscienceat, Klemens Urban</Authors>
       <Description>A connector for the XPlane Web API</Description>
       <PackageLicenseExpression>MIT</PackageLicenseExpression>

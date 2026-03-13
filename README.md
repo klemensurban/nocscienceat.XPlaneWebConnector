@@ -46,14 +46,14 @@ using nocscienceat.XPlaneWebConnector;
 using var loggerFactory = LoggerFactory.Create(b => b.AddConsole());
 var logger = loggerFactory.CreateLogger<XPlaneWebConnector>();
 
-// Create an IHttpClientFactory (requires Microsoft.Extensions.Http)
+// Create a named IHttpClientFactory (requires Microsoft.Extensions.Http)
 var services = new ServiceCollection();
-services.AddHttpClient();
+services.AddHttpClient("XPlane");
 using var provider = services.BuildServiceProvider();
 var httpClientFactory = provider.GetRequiredService<IHttpClientFactory>();
 
-// Create and start the connector
-var connector = new XPlaneWebConnector("localhost", 8086, CommandSetDataRefTransport.WebSocket, fireForgetOnHttpTransport: false, logger, httpClientFactory);
+// Create and start the connector (httpClientName must match the name registered above)
+var connector = new XPlaneWebConnector("localhost", 8086, CommandSetDataRefTransport.WebSocket, fireForgetOnHttpTransport: false, logger, httpClientFactory, httpClientName: "XPlane");
 connector.Start();
 
 // Subscribe to a float dataref
@@ -93,7 +93,7 @@ The library exposes one public interface, implemented by `XPlaneWebConnector`:
 |---|---|
 | `CommandSetDataRefTransport` | Enum selecting the transport for commands and dataref writes: `WebSocket` (default) or `Http` |
 | `IXPlaneWebConnectorSettings` | Interface for connector configuration — used with DI registration via `XPlaneWebConnectorSettings` |
-| `XPlaneWebConnectorSettings` | Bindable settings class with property aliases (`IpAddress`/`WebPort`) for flexible config binding |
+| `XPlaneWebConnectorSettings` | Bindable settings class with property aliases (`IpAddress`/`WebPort`) for flexible config binding. Includes `HttpClientName` for named `IHttpClientFactory` clients |
 | `SubscriptionHandle` | `IDisposable` returned by `SubscribeAsync` / `SubscribeCommandAsync` — disposing removes the consumer's callback and unsubscribes from X-Plane when no consumers remain |
 
 ### Supported Dataref Types
@@ -123,7 +123,8 @@ var connector = new XPlaneWebConnector(
     httpClientFactory: httpClientFactory,                 // IHttpClientFactory for REST calls
     readinessProbeDataRef: null,                          // Optional: wait for this dataref to exist before ready
     readinessProbeMaxRetries: 0,                          // Optional: max retries for readiness probe (0 = unlimited)
-    apiVersion: "v2"                                      // API version: "v1", "v2" (12.3), or "v3" (12.4+)
+    apiVersion: "v2",                                     // API version: "v1", "v2" (12.3), or "v3" (12.4+)
+    httpClientName: "XPlane"                               // Named IHttpClientFactory client (default: "" = default client)
 );
 ```
 
@@ -353,7 +354,8 @@ The recommended way to register the connector is via `IXPlaneWebConnectorSetting
     "FireForgetOnHttpTransport": true,
     "ApiVersion": "v2",
     "ReadinessProbeDataRef": "AirbusFBW/BatVolts",
-    "ReadinessProbeMaxRetries": 0
+    "ReadinessProbeMaxRetries": 0,
+    "HttpClientName": "XPlane"
   }
 }
 ```
@@ -361,17 +363,19 @@ The recommended way to register the connector is via `IXPlaneWebConnectorSetting
 Registration (requires `IHttpClientFactory` — register via `AddHttpClient`):
 
 ```csharp
-// Register IHttpClientFactory
-builder.Services.AddHttpClient();
-
 var settings = builder.Configuration.GetSection("XPlane").Get<XPlaneWebConnectorSettings>()
     ?? new XPlaneWebConnectorSettings();
+
+// Register a named IHttpClientFactory client matching settings.HttpClientName
+builder.Services.AddHttpClient(settings.HttpClientName);
 
 builder.Services.AddSingleton<IXPlaneWebConnectorSettings>(settings);
 builder.Services.AddSingleton<IXPlaneWebConnector, XPlaneWebConnector>();
 ```
 
-The DI container resolves `IXPlaneWebConnectorSettings`, `ILogger<XPlaneWebConnector>`, and `IHttpClientFactory` automatically.
+The DI container resolves `IXPlaneWebConnectorSettings`, `ILogger<XPlaneWebConnector>`, and `IHttpClientFactory` automatically. The connector requests a client by `HttpClientName` from the factory, so the name used in `AddHttpClient(...)` must match.
+
+> **Tip:** Set `HttpClientName` to a non-empty value (e.g. `"XPlane"`) to avoid overriding the default `IHttpClientFactory` client. Other components that call `httpClientFactory.CreateClient()` with no name will then get a plain, uncustomised client.
 
 Alternatively, use the raw-parameter constructor with a factory lambda:
 
@@ -385,7 +389,8 @@ builder.Services.AddSingleton<IXPlaneWebConnector>(sp =>
         sp.GetRequiredService<IHttpClientFactory>(),
         readinessProbeDataRef: "AirbusFBW/EnableExternalPower",
         readinessProbeMaxRetries: 30,
-        apiVersion: "v2"
+        apiVersion: "v2",
+        httpClientName: "XPlane"              // must match AddHttpClient("XPlane")
     ));
 ```
 

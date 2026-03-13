@@ -1027,6 +1027,7 @@ XPlaneWebConnector
 │
 ├── Transport
 │   ├── _httpClientFactory           IHttpClientFactory    Creates HttpClients per-call
+│   ├── _httpClientName              string                Named client for IHttpClientFactory
 │   ├── _webSocket                   ClientWebSocket?     Current WS connection
 │   ├── _cts                         CancellationTokenSource?  Lifecycle control
 │   └── _receiveTask                 Task?                Background WS receive
@@ -1075,13 +1076,14 @@ XPlaneWebConnector
 │   └── _nextReqId                   int (Interlocked.Increment)
 │
 └── Configuration (immutable after construction)
-    ├── _baseUrl                     "http://host:port/api/{apiVersion}"
-    ├── _wsUrl                       "ws://host:port/api/{apiVersion}"
-    ├── _capabilitiesUrl             "http://host:port/api/capabilities"
-    ├── _transport                   CommandSetDataRefTransport (WebSocket or Http)
-    ├── _fireForgetOnHttpTransport   bool — when true, HTTP writes return immediately
-    ├── _readinessProbeDataRef       string? (optional plugin dataref to wait for)
-    └── _readinessProbeMaxRetries    int (0 = unlimited)
+├── _baseUrl                     "http://host:port/api/{apiVersion}"
+├── _wsUrl                       "ws://host:port/api/{apiVersion}"
+├── _capabilitiesUrl             "http://host:port/api/capabilities"
+├── _transport                   CommandSetDataRefTransport (WebSocket or Http)
+├── _fireForgetOnHttpTransport   bool — when true, HTTP writes return immediately
+├── _httpClientName              string — named IHttpClientFactory client (default: "")
+├── _readinessProbeDataRef       string? (optional plugin dataref to wait for)
+└── _readinessProbeMaxRetries    int (0 = unlimited)
 ```
 
 ---
@@ -1158,4 +1160,4 @@ XPlaneWebConnector
 
 ---
 
-*This document reflects the library as of version 3.0.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*
+*This document reflects the library as of version 3.2.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*

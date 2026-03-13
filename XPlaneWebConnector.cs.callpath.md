@@ -47,9 +47,9 @@ It writes to two channels but never reads from any — consumption happens in ot
 ## Fields & Constructor
 
 ```
-XPlaneWebConnector(host, port, ...)
+XPlaneWebConnector(host, port, ..., httpClientName)
   └─ validates apiVersion against SupportedApiVersions
-  └─ initializes: _logger, _httpClientFactory, _baseUrl, _wsUrl, _capabilitiesUrl
+  └─ initializes: _logger, _httpClientFactory, _httpClientName, _baseUrl, _wsUrl, _capabilitiesUrl
   └─ initializes channels: _dataChannel, _commandChannel, _callbacks
   └─ initializes caches:   _dataRefIdCache, _reverseDataRefIdCache, _commandIdCache, _reverseCommandIdCache
   └─ initializes subs:     _subscriptions, _subscribedIndices, _subscriptionRegistry, _commandSubscriptions
@@ -57,6 +57,7 @@ XPlaneWebConnector(host, port, ...)
 XPlaneWebConnector(IXPlaneWebConnectorSettings, ILogger, IHttpClientFactory)
   └─ DI-friendly constructor — delegates to the raw-parameter constructor above
   └─ parses Transport string → CommandSetDataRefTransport enum (defaults to WebSocket)
+  └─ passes settings.HttpClientName to the raw constructor
 ```
 
 ---

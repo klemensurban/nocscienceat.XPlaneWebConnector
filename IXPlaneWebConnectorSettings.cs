@@ -36,4 +36,10 @@ public interface IXPlaneWebConnectorSettings
     /// Maximum readiness probe retries. <c>0</c> = unlimited.
     /// </summary>
     int ReadinessProbeMaxRetries { get; }
+
+    /// <summary>
+    /// Named <see cref="System.Net.Http.IHttpClientFactory"/> client to use.
+    /// Default: <c>""</c> (the default client).
+    /// </summary>
+    string HttpClientName { get; }
 }

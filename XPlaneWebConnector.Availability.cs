@@ -17,7 +17,7 @@ public sealed partial class XPlaneWebConnector
     {
         try
         {
-            using var response = await _httpClientFactory.CreateClient().GetAsync(_capabilitiesUrl, cancellationToken);
+            using var response = await CreateHttpClient().GetAsync(_capabilitiesUrl, cancellationToken);
             if (!response.IsSuccessStatusCode)
                 return false;
 
@@ -71,7 +71,7 @@ public sealed partial class XPlaneWebConnector
 
             try
             {
-                using var response = await _httpClientFactory.CreateClient().GetAsync(probeUrl, cancellationToken);
+                using var response = await CreateHttpClient().GetAsync(probeUrl, cancellationToken);
 
                 if (response.IsSuccessStatusCode)
                 {

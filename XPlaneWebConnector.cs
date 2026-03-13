@@ -24,6 +24,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 {
     private readonly ILogger<XPlaneWebConnector> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly string _httpClientName;
     private readonly CommandSetDataRefTransport _transport;
     private readonly bool _fireForgetOnHttpTransport;
     private readonly string _baseUrl;
@@ -88,13 +89,14 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
     private static readonly HashSet<string> SupportedApiVersions = ["v1", "v2", "v3"];
 
     public XPlaneWebConnector(string host, int port, CommandSetDataRefTransport commandTransport, bool fireForgetOnHttpTransport, ILogger<XPlaneWebConnector> logger, IHttpClientFactory httpClientFactory, 
-        string? readinessProbeDataRef = null, int readinessProbeMaxRetries = 0, string apiVersion = "v2")
+        string? readinessProbeDataRef = null, int readinessProbeMaxRetries = 0, string apiVersion = "v2", string httpClientName = "")
     {
         if (!SupportedApiVersions.Contains(apiVersion))
             throw new ArgumentException($"Unsupported API version '{apiVersion}'. Supported: {string.Join(", ", SupportedApiVersions)}", nameof(apiVersion));
 
         _logger = logger;
         _httpClientFactory = httpClientFactory;
+        _httpClientName = httpClientName;
         _baseUrl = $"http://{host}:{port}/api/{apiVersion}";
         _wsUrl = $"ws://{host}:{port}/api/{apiVersion}";
         _capabilitiesUrl = $"http://{host}:{port}/api/capabilities";
@@ -103,6 +105,8 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         _transport = commandTransport;
         _fireForgetOnHttpTransport = fireForgetOnHttpTransport;
     }
+
+    private HttpClient CreateHttpClient() => _httpClientFactory.CreateClient(_httpClientName);
 
     /// <summary>
     /// DI-friendly constructor. Resolves settings from <see cref="IXPlaneWebConnectorSettings"/>.
@@ -116,7 +120,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         : this(settings.Host, settings.Port,
                Enum.TryParse<CommandSetDataRefTransport>(settings.Transport, ignoreCase: true, out var parsed) ? parsed : CommandSetDataRefTransport.WebSocket,
                settings.FireForgetOnHttpTransport, logger, httpClientFactory,
-               settings.ReadinessProbeDataRef, settings.ReadinessProbeMaxRetries, settings.ApiVersion)
+               settings.ReadinessProbeDataRef, settings.ReadinessProbeMaxRetries, settings.ApiVersion, settings.HttpClientName)
     {
     }
 
@@ -335,7 +339,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             return cachedXPlaneDataRefInfo;
 
         var url = $"{_baseUrl}/datarefs?filter[name]={Uri.EscapeDataString(dataRefPath)}";
-        using var response = await _httpClientFactory.CreateClient().GetAsync(url);
+        using var response = await CreateHttpClient().GetAsync(url);
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync();
@@ -357,7 +361,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
             return cachedId;
 
         var url = $"{_baseUrl}/commands?filter[name]={Uri.EscapeDataString(commandPath)}&fields=id,name";
-        using var response = await _httpClientFactory.CreateClient().GetAsync(url);
+        using var response = await CreateHttpClient().GetAsync(url);
         response.EnsureSuccessStatusCode();
 
         await using var stream = await response.Content.ReadAsStreamAsync();
