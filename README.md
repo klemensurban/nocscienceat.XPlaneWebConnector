@@ -23,6 +23,7 @@ Provides a high-level interface for subscribing to datarefs, setting dataref val
 - **Connection closed event** — detect when X-Plane shuts down for graceful cleanup
 - **Non-blocking architecture** — WebSocket reads and callback dispatching run on separate tasks; slow consumers never stall the receive loop
 - **Array dataref support** — subscribe to individual indices of array datarefs (e.g. `AirbusFBW/Foo[7]`)
+- **One-line DI registration** — `services.AddXPlaneWebConnector(configuration)` wires up settings, `HttpClient`, and the connector singleton in a single call
 - **Cache warm-up** — optionally pre-resolve dataref and command IDs at startup via `PreResolveDataRefAsync` / `PreResolveCommandAsync` so the first runtime use avoids a REST round-trip
 
 ## Requirements
@@ -38,28 +39,19 @@ dotnet add package nocscienceat.XPlaneWebConnector
 
 ## Quick Start
 
+The fastest way to get started is with the `AddXPlaneWebConnector` extension method and a `HostApplicationBuilder`:
+
 ```csharp
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging;
-using nocscienceat.XPlaneWebConnector;
+using Microsoft.Extensions.Hosting;
 
-using var loggerFactory = LoggerFactory.Create(b => b.AddConsole());
-var logger = loggerFactory.CreateLogger<XPlaneWebConnector>();
+var builder = Host.CreateApplicationBuilder(args);
 
-// Create a named IHttpClientFactory (requires Microsoft.Extensions.Http)
-var services = new ServiceCollection();
-services.AddHttpClient("XPlane", client =>
-{
-    client.DefaultRequestHeaders.Add("Accept", "application/json");
-}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
-{
-    MaxConnectionsPerServer = 30
-});
-using var provider = services.BuildServiceProvider();
-var httpClientFactory = provider.GetRequiredService<IHttpClientFactory>();
+// One-line registration: binds settings from the "XPlane" config section,
+// registers a named HttpClient, and adds IXPlaneWebConnector as a singleton.
+builder.Services.AddXPlaneWebConnector(builder.Configuration);
 
-// Create and start the connector (httpClientName must match the name registered above)
-var connector = new XPlaneWebConnector("localhost", 8086, CommandSetDataRefTransport.WebSocket, fireForgetOnHttpTransport: false, logger, httpClientFactory, httpClientName: "XPlane");
+var host = builder.Build();
+var connector = host.Services.GetRequiredService<IXPlaneWebConnector>();
 connector.Start();
 
 // Subscribe to a float dataref
@@ -80,6 +72,8 @@ Console.ReadLine();
 // Clean shutdown
 await connector.StopAsync();
 ```
+
+> **Without a host builder?** See [Manual Registration](#manual-registration) below for standalone `ServiceCollection` usage.
 
 ## Core Concepts
 
@@ -349,7 +343,31 @@ The `IXPlaneApi` interface is `internal` and documents the full X-Plane REST + W
 
 ## Dependency Injection
 
-The recommended way to register the connector is via `IXPlaneWebConnectorSettings`. The library provides `XPlaneWebConnectorSettings` which can bind directly from any `IConfiguration` section. It supports property aliases (`IpAddress` → `Host`, `WebPort` → `Port`) so it can share a config section with consumer-specific settings — each class picks up what it needs and ignores the rest.
+### Recommended: `AddXPlaneWebConnector` Extension
+
+The library provides an `IServiceCollection` extension that handles all registration in a single call:
+
+```csharp
+builder.Services.AddXPlaneWebConnector(builder.Configuration);
+```
+
+This reads `XPlaneWebConnectorSettings` from the `"XPlane"` configuration section, registers a named `HttpClient` with an `Accept: application/json` header and a `SocketsHttpHandler`, and adds `IXPlaneWebConnector` as a singleton.
+
+The extension method accepts optional parameters:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `sectionName` | `"XPlane"` | Configuration section to bind settings from |
+| `maxConnectionsPerServer` | `30` | Maximum concurrent connections per server for the `SocketsHttpHandler` |
+
+```csharp
+// Custom section name and connection limit
+builder.Services.AddXPlaneWebConnector(builder.Configuration, sectionName: "FlightSim", maxConnectionsPerServer: 50);
+```
+
+### Configuration
+
+`XPlaneWebConnectorSettings` can bind directly from any `IConfiguration` section. It supports property aliases (`IpAddress` → `Host`, `WebPort` → `Port`) so it can share a config section with consumer-specific settings — each class picks up what it needs and ignores the rest.
 
 ```json
 {
@@ -366,13 +384,18 @@ The recommended way to register the connector is via `IXPlaneWebConnectorSetting
 }
 ```
 
-Registration (requires `IHttpClientFactory` — register via `AddHttpClient`):
+> **Note:** The `Accept` header and `SocketsHttpHandler` configuration are recommended but not strictly required — the X-Plane API returns JSON by default. Increasing `MaxConnectionsPerServer` avoids connection pool exhaustion when many REST calls (e.g. cache warm-up) run in parallel.
+
+> **Tip:** Set `HttpClientName` to a non-empty value (e.g. `"XPlane"`) to avoid overriding the default `IHttpClientFactory` client. Other components that call `httpClientFactory.CreateClient()` with no name will then get a plain, uncustomised client.
+
+### Manual Registration
+
+If you need full control over the `HttpClient` or handler configuration, register the components individually:
 
 ```csharp
 var settings = builder.Configuration.GetSection("XPlane").Get<XPlaneWebConnectorSettings>()
     ?? new XPlaneWebConnectorSettings();
 
-// Register a named IHttpClientFactory client matching settings.HttpClientName
 builder.Services.AddHttpClient(settings.HttpClientName, client =>
 {
     client.DefaultRequestHeaders.Add("Accept", "application/json");
@@ -384,12 +407,6 @@ builder.Services.AddHttpClient(settings.HttpClientName, client =>
 builder.Services.AddSingleton<IXPlaneWebConnectorSettings>(settings);
 builder.Services.AddSingleton<IXPlaneWebConnector, XPlaneWebConnector>();
 ```
-
-> **Note:** The `Accept` header and `SocketsHttpHandler` configuration are recommended but not strictly required — the X-Plane API returns JSON by default. Increasing `MaxConnectionsPerServer` avoids connection pool exhaustion when many REST calls (e.g. cache warm-up) run in parallel.
-
-The DI container resolves `IXPlaneWebConnectorSettings`, `ILogger<XPlaneWebConnector>`, and `IHttpClientFactory` automatically. The connector requests a client by `HttpClientName` from the factory, so the name used in `AddHttpClient(...)` must match.
-
-> **Tip:** Set `HttpClientName` to a non-empty value (e.g. `"XPlane"`) to avoid overriding the default `IHttpClientFactory` client. Other components that call `httpClientFactory.CreateClient()` with no name will then get a plain, uncustomised client.
 
 Alternatively, use the raw-parameter constructor with a factory lambda:
 
