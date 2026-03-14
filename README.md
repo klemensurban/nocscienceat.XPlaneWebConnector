@@ -48,7 +48,13 @@ var logger = loggerFactory.CreateLogger<XPlaneWebConnector>();
 
 // Create a named IHttpClientFactory (requires Microsoft.Extensions.Http)
 var services = new ServiceCollection();
-services.AddHttpClient("XPlane");
+services.AddHttpClient("XPlane", client =>
+{
+    client.DefaultRequestHeaders.Add("Accept", "application/json");
+}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+{
+    MaxConnectionsPerServer = 30
+});
 using var provider = services.BuildServiceProvider();
 var httpClientFactory = provider.GetRequiredService<IHttpClientFactory>();
 
@@ -367,11 +373,19 @@ var settings = builder.Configuration.GetSection("XPlane").Get<XPlaneWebConnector
     ?? new XPlaneWebConnectorSettings();
 
 // Register a named IHttpClientFactory client matching settings.HttpClientName
-builder.Services.AddHttpClient(settings.HttpClientName);
+builder.Services.AddHttpClient(settings.HttpClientName, client =>
+{
+    client.DefaultRequestHeaders.Add("Accept", "application/json");
+}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+{
+    MaxConnectionsPerServer = 30
+});
 
 builder.Services.AddSingleton<IXPlaneWebConnectorSettings>(settings);
 builder.Services.AddSingleton<IXPlaneWebConnector, XPlaneWebConnector>();
 ```
+
+> **Note:** The `Accept` header and `SocketsHttpHandler` configuration are recommended but not strictly required — the X-Plane API returns JSON by default. Increasing `MaxConnectionsPerServer` avoids connection pool exhaustion when many REST calls (e.g. cache warm-up) run in parallel.
 
 The DI container resolves `IXPlaneWebConnectorSettings`, `ILogger<XPlaneWebConnector>`, and `IHttpClientFactory` automatically. The connector requests a client by `HttpClientName` from the factory, so the name used in `AddHttpClient(...)` must match.
 
