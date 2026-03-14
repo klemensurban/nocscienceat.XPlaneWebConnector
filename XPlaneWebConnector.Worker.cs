@@ -163,7 +163,7 @@ public sealed partial class XPlaneWebConnector
         else
         {
             _reverseDataRefIdCache.TryGetValue(id, out string name);
-            _logger.LogError("Received array Update with nor registered indices for dataRef {Name}", name);
+            _logger.LogError("Received array Update with no registered indices for dataRef {Name}", name);
         }
     }
 
