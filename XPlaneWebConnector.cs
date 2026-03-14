@@ -400,13 +400,27 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
     public async Task PreResolveDataRefAsync(string dataRefPath)
     {
-        var (basePath, _) = ParseDataRefPath(dataRefPath);
-        await ResolveDataRefIdAsync(basePath);
+        try
+        {
+            var (basePath, _) = ParseDataRefPath(dataRefPath);
+            await ResolveDataRefIdAsync(basePath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to pre-resolve dataref '{DataRefPath}' — will retry on first use", dataRefPath);
+        }
     }
 
     public async Task PreResolveCommandAsync(string commandPath)
     {
-        await ResolveCommandIdAsync(commandPath);
+        try
+        {
+            await ResolveCommandIdAsync(commandPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to pre-resolve command '{CommandPath}' — will retry on first use", commandPath);
+        }
     }
 
     // ========================================================================

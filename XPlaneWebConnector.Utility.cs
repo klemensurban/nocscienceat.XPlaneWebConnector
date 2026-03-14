@@ -26,6 +26,4 @@ public sealed partial class XPlaneWebConnector
         return (path, -1);
     }
 
-
-
 }
