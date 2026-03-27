@@ -162,8 +162,9 @@ public sealed partial class XPlaneWebConnector
         }
         else
         {
-            _reverseDataRefIdCache.TryGetValue(id, out string name);
-            _logger.LogError("Received array Update with no registered indices for dataRef {Name}", name);
+            // Benign race: last consumer unsubscribed and _subscribedIndices was cleaned up,
+            // but X-Plane delivered one more update before processing the WS unsubscribe message.
+            _logger.LogDebug("Received array update for dataRef id={Id} with no registered indices (stale update after unsubscribe)", id);
         }
     }
 

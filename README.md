@@ -25,6 +25,7 @@ Provides a high-level interface for subscribing to datarefs, setting dataref val
 - **Array dataref support** — subscribe to individual indices of array datarefs (e.g. `AirbusFBW/Foo[7]`)
 - **One-line DI registration** — `services.AddXPlaneWebConnector(configuration)` wires up settings, `HttpClient`, and the connector singleton in a single call
 - **Cache warm-up** — optionally pre-resolve dataref and command IDs at startup via `PreResolveDataRefAsync` / `PreResolveCommandAsync` so the first runtime use avoids a REST round-trip
+- **Virtual datarefs** — extensible `xplanewebconnector/*` synthetic datarefs that derive values from real X-Plane datarefs (e.g. teleport detection); consumers subscribe and write with the standard `SubscribeAsync` / `SetDataRefValueAsync` patterns; register custom providers via `RegisterVirtualDataRef<T>`; providers optionally handle writes by overriding `OnValueWritten`
 
 ## Requirements
 
@@ -95,6 +96,7 @@ The library exposes one public interface, implemented by `XPlaneWebConnector`:
 | `IXPlaneWebConnectorSettings` | Interface for connector configuration — used with DI registration via `XPlaneWebConnectorSettings` |
 | `XPlaneWebConnectorSettings` | Bindable settings class with property aliases (`IpAddress`/`WebPort`) for flexible config binding. Includes `HttpClientName` for named `IHttpClientFactory` clients |
 | `SubscriptionHandle` | `IDisposable` returned by `SubscribeAsync` / `SubscribeCommandAsync` — disposing removes the consumer's callback and unsubscribes from X-Plane when no consumers remain |
+| `IVirtualDataRefProvider<T>` | Public interface for custom virtual dataref providers — implement this to create synthetic datarefs under the `xplanewebconnector/` path prefix |
 
 ### Supported Dataref Types
 
@@ -327,6 +329,118 @@ await Task.WhenAll(
 );
 ```
 
+### Virtual Datarefs
+
+Virtual datarefs are synthetic values derived from real X-Plane datarefs, exposed under the `xplanewebconnector/` path prefix. Consumers subscribe using the standard `SubscribeAsync` overloads — no special API needed.
+
+
+#### Built-in: Teleport Detection
+
+The connector includes a built-in `xplanewebconnector/teleport` virtual dataref that fires an `int` value when the aircraft position jumps:
+
+| Value | Meaning |
+|-------|---------|
+| `1` | Distance > 1 000 m |
+| `2` | Distance > 2 000 m |
+| `3` | Distance > 50 km |
+
+The provider subscribes to `sim/flightmodel/position/latitude` and `sim/flightmodel/position/longitude` lazily (on first consumer) and uses squared equirectangular distance thresholds (no `sqrt`).
+
+```csharp
+await connector.SubscribeAsync("xplanewebconnector/teleport", (int level) =>
+{
+    Console.WriteLine($"Teleport detected! Level={level}");
+});
+```
+
+#### Built-in: AirbusFBW Alive Handshake
+
+The connector includes a built-in `xplanewebconnector/AirbusFBWalive` virtual dataref that verifies the ToLiss AirbusFBW plugin is responsive after a teleport or scenery reload.
+
+- **How it works:**
+  Writing any `int` value to this dataref triggers a round-trip handshake:
+  1. Sets the LightDome dataref to DIM (1), waits for confirmation
+  2. Sets it to OFF (0), waits for confirmation
+  3. If both succeed, emits `1` to all subscribers; on failure, emits `0`
+  4. If a handshake is already running, further writes are ignored until it completes
+
+- **Usage example:**
+```csharp
+// Wait for ToLiss plugin to be alive after scenery reload
+var tcs = new TaskCompletionSource<int>();
+var sub = await connector.SubscribeAsync("xplanewebconnector/AirbusFBWalive", v => { if (v == 1) tcs.TrySetResult(v); });
+await connector.SetDataRefValueAsync("xplanewebconnector/AirbusFBWalive", 1);
+await tcs.Task;
+sub.Dispose();
+```
+
+- **Intended use:**
+Panels should use this handshake before resetting hardware after a teleport with scenery reload, to ensure X-Plane and the plugin are ready to report switch/knob states.
+
+#### Custom Virtual Datarefs
+
+Implement `IVirtualDataRefProvider<T>` and register it before the first subscription:
+
+```csharp
+public class GroundSpeedKtsProvider : IVirtualDataRefProvider<float>
+{
+    public string Prefix => "groundspeed_kts";
+
+    public async Task InitializeAsync(IXPlaneWebConnector connector, Action<float> emit)
+    {
+        await connector.SubscribeAsync("sim/flightmodel/position/groundspeed",
+            (float mPerSec) => emit(mPerSec * 1.94384f));
+    }
+}
+
+// Register at startup (before any panel subscribes)
+connector.RegisterVirtualDataRef(new GroundSpeedKtsProvider());
+
+// Any consumer subscribes normally
+await connector.SubscribeAsync("xplanewebconnector/groundspeed_kts", (float kts) =>
+{
+    Console.WriteLine($"GS: {kts:F0} kts");
+});
+```
+
+Key rules for providers:
+- `InitializeAsync` is called once, lazily, when the first consumer subscribes
+- The `emit` delegate fans out to all consumers through the same callback channel as native datarefs
+- Subscriptions to real X-Plane datarefs inside `InitializeAsync` must NOT be disposed
+- `CallbackType` is derived automatically from `T` via a default interface implementation
+- Override `OnValueWritten(T value)` to handle writes via `SetDataRefValueAsync`; the default is a no-op (read-only)
+- `OnValueWritten` runs on the Callback Task (same thread as `emit` callbacks) — no locks needed
+
+#### Writable Virtual Datarefs
+
+Providers can optionally accept writes by overriding `OnValueWritten`. Consumers write using the standard `SetDataRefValueAsync` — the connector intercepts the `xplanewebconnector/` prefix and routes through the callback channel:
+
+```csharp
+public class BrightnessOverrideProvider : IVirtualDataRefProvider<float>
+{
+    private Action<float>? _emit;
+    public string Prefix => "brightness_override";
+
+    public Task InitializeAsync(IXPlaneWebConnector connector, Action<float> emit)
+    {
+        _emit = emit;
+        return Task.CompletedTask;
+    }
+
+    public void OnValueWritten(float value)
+    {
+        // Clamp and echo back to all subscribers
+        _emit?.Invoke(Math.Clamp(value, 0f, 1f));
+    }
+}
+
+// Register
+connector.RegisterVirtualDataRef(new BrightnessOverrideProvider());
+
+// Write — routed to OnValueWritten on the Callback Task
+await connector.SetDataRefValueAsync("xplanewebconnector/brightness_override", 0.75f);
+```
+
 ### Detecting Connection Loss
 
 ```csharp
@@ -551,6 +665,17 @@ Using the wrong type for a dataref now throws `InvalidOperationException` with a
 | [XPlaneWebConnector.Transport.cs.callpath.md](XPlaneWebConnector.Transport.cs.callpath.md) | Call path diagram for WebSocket transport (receive loop, send helper) |
 | [XPlaneWebConnector.CallbackChannel.cs.callpath.md](XPlaneWebConnector.CallbackChannel.cs.callpath.md) | Call path diagram for the callback channel (final dispatch to consumers) |
 | [XPlaneWebConnector.Utility.cs.callpath.md](XPlaneWebConnector.Utility.cs.callpath.md) | Call path diagram for utility methods (path parsing, byte decoding) |
+
+### What's New in 3.4.0
+
+- **Writable virtual datarefs** — `SetDataRefValueAsync` now intercepts `xplanewebconnector/` paths and routes to `IVirtualDataRefProvider<T>.OnValueWritten`; writes are dispatched through the callback channel for thread safety
+- **`OnValueWritten(T)` default interface method** — providers override to handle writes; default is no-op (read-only)
+
+### What's New in 3.3.0
+
+- **Virtual datarefs** — extensible `xplanewebconnector/*` synthetic datarefs with the `IVirtualDataRefProvider<T>` public interface
+- **Built-in teleport detection** — `xplanewebconnector/teleport` fires on position jumps > 1 km
+- **`RegisterVirtualDataRef<T>`** added to `IXPlaneWebConnector` for external extensibility
 
 ## License
 

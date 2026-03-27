@@ -20,6 +20,7 @@ This document provides a detailed description of the internal data flows, thread
 12. [Real-World Consumer Example](#12-real-world-consumer-example)
 13. [Internal State & Data Structures](#13-internal-state--data-structures)
 14. [Design Decisions & Trade-offs](#14-design-decisions--trade-offs)
+15. [Virtual Datarefs](#15-virtual-datarefs)
 
 ---
 
@@ -1160,4 +1161,143 @@ XPlaneWebConnector
 
 ---
 
-*This document reflects the library as of version 3.2.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*
+*This document reflects the library as of version 3.4.0. Last updated based on source analysis of the `nocscienceat.XPlaneWebConnector` and `JavaSimulator.Console` projects.*
+
+---
+
+## 15. Virtual Datarefs
+
+Virtual datarefs are synthetic values exposed under the `xplanewebconnector/` path prefix. They are intercepted in the `SubscribeAsync` and `SetDataRefValueAsync` overloads before any X-Plane REST/WS call.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  IXPlaneWebConnector.SubscribeAsync(path, Action<T>)          │
+│                         │                                      │
+│          path.StartsWith("xplanewebconnector/") ?             │
+│                  ┌──────┴──────┐                               │
+│                  │ yes          │ no                            │
+│                  ▼              ▼                               │
+│  ┌──────────────────┐  ┌───────────────────────────────┐  │
+│  │ VirtualDataRef     │  │ Normal X-Plane subscription     │  │
+│  │ Registry           │  │ (REST resolve → WS subscribe)   │  │
+│  │                    │  └───────────────────────────────┘  │
+│  │ VirtualEntry<T>    │                                      │
+│  │  • consumer list   │                                      │
+│  │  • copy-on-write   │                                      │
+│  │  • emit delegate   │                                      │
+│  └──────────────────┘                                      │
+│           │                                                    │
+│           ▼                                                    │
+│  IVirtualDataRefProvider<T>                                    │
+│  (provider calls emit(value)                                   │
+│   from inside a native dataref callback)                       │
+│           │                                                    │
+│           ▼                                                    │
+│  _callbacks.Writer.TryWrite(() => consumerCb(value))           │
+│  (same channel as native datarefs)                             │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Dataflow: Virtual Dataref (e.g. Teleport Detection)
+
+```
+X-Plane                        Library                                   Consumer
+   │                              │                                         │
+   │ WS: latitude update          │                                         │
+   │────────────────────────────>  Stage 1–3 (normal native pipeline)         │
+   │                              │  ReceiveLoop → Worker → _callbacks       │
+   │                              │  → Callback Task invokes:                │
+   │                              │    provider’s lat callback               │
+   │                              │                                         │
+   │                              │  TeleportDetectorProvider:              │
+   │                              │    CheckTeleport(newLat, _longitude)     │
+   │                              │    distSq > threshold?                   │
+   │                              │      │ yes                               │
+   │                              │      ▼                                   │
+   │                              │    _emit(level)                          │
+   │                              │      │                                   │
+   │                              │      ▼                                   │
+   │                              │    VirtualEntry<int> emit delegate:      │
+   │                              │    for each consumer cb:                 │
+   │                              │      _callbacks.Writer.TryWrite(          │
+   │                              │        () => cb(level))                   │
+   │                              │      │                                   │
+   │                              │      ▼                                   │
+   │                              │    Callback Task (2nd pass):             │
+   │                              │      invokes cb(level) ────────────────>  │
+   │                              │                                         │
+```
+
+Virtual dataref consumer callbacks take **two trips** through `_callbacks`:
+1. The provider’s source subscription (lat/lon) arrives via the normal 3-stage pipeline
+2. The provider calls `_emit(level)`, which queues each consumer callback back into `_callbacks`
+
+This makes virtual datarefs **indistinguishable from native ones** from the consumer’s perspective — all callbacks arrive on the Callback Task via the same channel.
+
+### Internal State
+
+```
+XPlaneWebConnector
+│
+├── _virtualRegistry              VirtualDataRefRegistry (internal)
+│   ├── _entries                  Dictionary<string, VirtualEntry>
+│   │                              "teleport" → VirtualEntry<int>
+│   │
+│   └── VirtualEntry<T>           (per registered provider)
+│       ├── Provider              IVirtualDataRefProvider<T> (public interface)
+│       ├── _consumers            List<Action<T>> (copy-on-write)
+│       ├── _initialized          bool (lazy init gate)
+│       └── emit delegate         Action<T> → fans out via _callbacks.Writer
+│
+```
+
+### Built-in Providers
+
+| Path | Type | Provider | Description |
+|------|------|----------|-------------|
+| `xplanewebconnector/teleport` | `int` | `TeleportDetectorProvider` | Fires 1/2/3 when position jumps > 1km / 2km / 50km |
+| `xplanewebconnector/AirbusFBWalive` | `int` | `AirbusFbwAliveProvider` | Emits 1 after LightDome handshake confirms ToLiss plugin is alive |
+
+### Design Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| Intercept at `SubscribeAsync` level | Minimal change — one `if` check per subscribe call, zero impact on existing paths |
+| Registry owns consumer lists | Single responsibility — providers are pure value sources |
+| Emit through `_callbacks` channel | Indistinguishable from native datarefs; consistent threading model |
+| `IVirtualDataRefProvider<T>` is public | External extensibility without exposing internal registry/entry types |
+| `CallbackType` via default interface method | Providers don’t need to declare it — derived from `T` automatically |
+| No X-Plane unsubscribe on last consumer | Requirement — once lat/lon are subscribed they stay alive |
+| `OnValueWritten` default no-op | Read-only providers don't need to implement anything |
+| Writes routed through `_callbacks` | `OnValueWritten` runs on the Callback Task — same thread as `emit`, no locks needed |
+| `SetDataRefValueAsync` intercepts virtual paths | Prevents REST call to X-Plane for `xplanewebconnector/` paths |
+
+### Dataflow: Writing to a Virtual Dataref
+
+```
+Consumer                       Library                                   Provider
+   │                              │                                         │
+   │ SetDataRefValueAsync(         │                                         │
+   │   "xplanewebconnector/...",  │                                         │
+   │   value)                     │                                         │
+   │─────────────────────────────>│                                         │
+   │                              │  TryWriteVirtualValue(path, value)      │
+   │                              │  ├─ TryGetVirtualEntry (type check)     │
+   │                              │  └─ entry.WriteValue(value, _callbacks) │
+   │                              │      │                                  │
+   │                              │      ▼                                  │
+   │                              │  _callbacks.Writer.TryWrite(            │
+   │                              │    () => provider.OnValueWritten(value)) │
+   │                              │      │                                  │
+   │                              │      ▼                                  │
+   │                              │  Callback Task:                         │
+   │                              │    provider.OnValueWritten(value) ──────>│
+   │                              │                                         │
+   │                              │    (provider may call _emit(...)         │
+   │                              │     to echo value to subscribers)       │
+   │                              │                                         │
+```
+
+Writes take **one trip** through `_callbacks` — the `OnValueWritten` call is queued and invoked on the Callback Task. If the provider calls `_emit(...)` inside `OnValueWritten`, the consumer fanout takes a **second trip** through `_callbacks` (same as the read path).

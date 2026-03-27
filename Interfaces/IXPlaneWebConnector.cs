@@ -1,4 +1,5 @@
 using nocscienceat.XPlaneWebConnector.Models;
+using nocscienceat.XPlaneWebConnector.VirtualDataRefs;
 
 namespace nocscienceat.XPlaneWebConnector.Interfaces;
 
@@ -108,5 +109,19 @@ public interface IXPlaneWebConnector : IDisposable
     /// cached ID instead of making a REST call. No-op if already cached.
     /// </summary>
     Task PreResolveCommandAsync(string commandPath);
+
+    // ========================================================================
+    // Virtual datarefs (xplanewebconnector/*)
+    // ========================================================================
+
+    /// <summary>
+    /// Registers a custom virtual dataref provider. Once registered, consumers can
+    /// subscribe to <c>xplanewebconnector/{provider.Prefix}</c> using the standard
+    /// <see cref="SubscribeAsync"/> overloads. The provider is initialized lazily
+    /// when the first consumer subscribes.
+    /// </summary>
+    /// <typeparam name="T">The callback value type (must match the <see cref="SubscribeAsync"/> overload used by consumers).</typeparam>
+    /// <param name="provider">The virtual dataref provider to register.</param>
+    void RegisterVirtualDataRef<T>(IVirtualDataRefProvider<T> provider);
 }
 

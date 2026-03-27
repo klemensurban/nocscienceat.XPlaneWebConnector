@@ -2,6 +2,7 @@ using ChannelWorker;
 using Microsoft.Extensions.Logging;
 using nocscienceat.XPlaneWebConnector.Interfaces;
 using nocscienceat.XPlaneWebConnector.Models;
+using nocscienceat.XPlaneWebConnector.VirtualDataRefs;
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
 using System.Text;
@@ -79,6 +80,9 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
     private readonly Channel<Action> _callbacks = Channel.CreateUnbounded<Action>(new UnboundedChannelOptions { SingleReader = true });
 
+    // Virtual datarefs (xplanewebconnector/*) — handled internally, never sent to X-Plane
+    private readonly VirtualDataRefRegistry _virtualRegistry = new();
+
     // Readiness probe configuration
     private readonly string? _readinessProbeDataRef;
     private readonly int _readinessProbeMaxRetries;
@@ -104,6 +108,9 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         _readinessProbeMaxRetries = readinessProbeMaxRetries;
         _transport = commandTransport;
         _fireForgetOnHttpTransport = fireForgetOnHttpTransport;
+
+        _virtualRegistry.Register<int>(new TeleportDetectorProvider());
+        _virtualRegistry.Register<int>(new AirbusFbwAliveProvider());
     }
 
     private HttpClient CreateHttpClient() => _httpClientFactory.CreateClient(_httpClientName);
@@ -135,8 +142,7 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
         _callbackTask = StartCallbacksAsync(_cts.Token);
 
         var handler = new DataRefWorkerHandler(this);
-        var worker = new Worker<WorkerCommand, bool, XPlaneDataMessage>(
-            _commandChannel, _dataChannel, handler, _logger);
+        var worker = new Worker<WorkerCommand, bool, XPlaneDataMessage>(_commandChannel, _dataChannel, handler, _logger);
         _workerTask = worker.RunAsync(_cts.Token);
 
         _logger.LogInformation("XPlaneWebConnector started (REST: {RestUrl}, WS: {WsUrl})", _baseUrl, _wsUrl);
@@ -204,26 +210,86 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
     public async Task<IDisposable> SubscribeAsync(string dataRefPath, Action<float> onchange)
     {
+        if (TryGetVirtualEntry(dataRefPath, typeof(float)) is { } entry)
+            return await SubscribeVirtualAsync(dataRefPath, entry, onchange);
+
         var (info, index) = await ResolveAndValidateDataRefAsync(dataRefPath, static i => i.IsTypeFloat, "float", supportsArrayIndex: true);
         return await SubscribeAsyncInternal(dataRefPath, info, index, onchange);
     }
 
     public async Task<IDisposable> SubscribeAsync(string dataRefPath, Action<int> onchange)
     {
+        if (TryGetVirtualEntry(dataRefPath, typeof(int)) is { } entry)
+            return await SubscribeVirtualAsync(dataRefPath, entry, onchange);
+
         var (info, index) = await ResolveAndValidateDataRefAsync(dataRefPath, static i => i.IsTypeInt, "int", supportsArrayIndex: true);
         return await SubscribeAsyncInternal(dataRefPath, info, index, onchange);
     }
 
     public async Task<IDisposable> SubscribeAsync(string dataRefPath, Action<double> onchange)
     {
+        if (TryGetVirtualEntry(dataRefPath, typeof(double)) is { } entry)
+            return await SubscribeVirtualAsync(dataRefPath, entry, onchange);
+
         var (info, index) = await ResolveAndValidateDataRefAsync(dataRefPath, static i => i.IsTypeDouble, "double", supportsArrayIndex: false);
         return await SubscribeAsyncInternal(dataRefPath, info, index, onchange);
     }
 
     public async Task<IDisposable> SubscribeAsync(string dataRefPath, Action<string> onchange)
     {
+        if (TryGetVirtualEntry(dataRefPath, typeof(string)) is { } entry)
+            return await SubscribeVirtualAsync(dataRefPath, entry, onchange);
+
         var (info, index) = await ResolveAndValidateDataRefAsync(dataRefPath, static i => i.IsTypeData, "data/string", supportsArrayIndex: false);
         return await SubscribeAsyncInternal(dataRefPath, info, index, onchange);
+    }
+
+    // ========================================================================
+    // Virtual dataref helpers (xplanewebconnector/*)
+    // ========================================================================
+
+    /// <inheritdoc />
+    public void RegisterVirtualDataRef<T>(IVirtualDataRefProvider<T> provider)
+    {
+        _virtualRegistry.Register<T>(provider);
+        _logger.LogDebug("Registered virtual dataref provider: xplanewebconnector/{Prefix} (type={Type})",
+            provider.Prefix, typeof(T).Name);
+    }
+
+    private VirtualEntry? TryGetVirtualEntry(string dataRefPath, Type callbackType)
+    {
+        if (!_virtualRegistry.TryGetEntry(dataRefPath, out var entry))
+            return null;
+
+        if (entry!.CallbackType != callbackType)
+            throw new InvalidOperationException(
+                $"Virtual dataref '{dataRefPath}' expects Action<{entry.CallbackType.Name}> but Action<{callbackType.Name}> was provided.");
+
+        return entry;
+    }
+
+    private async Task<IDisposable> SubscribeVirtualAsync(string dataRefPath, VirtualEntry entry, Delegate callback)
+    {
+        var handle = entry.AddConsumer(callback);
+        await entry.EnsureInitializedAsync(this, _callbacks.Writer);
+        _logger.LogDebug("Subscribed to virtual dataref {Path}", dataRefPath);
+        return handle;
+    }
+
+    /// <summary>
+    /// Checks if <paramref name="dataRefPath"/> is a virtual dataref, validates the type,
+    /// and routes the write through the callback channel to the provider's
+    /// <see cref="IVirtualDataRefProvider{T}.OnValueWritten"/>.
+    /// Returns <c>true</c> if the path was handled (caller should return immediately).
+    /// </summary>
+    private bool TryWriteVirtualValue(string dataRefPath, object value, Type valueType)
+    {
+        if (TryGetVirtualEntry(dataRefPath, valueType) is not { } entry)
+            return false;
+
+        entry.WriteValue(value, _callbacks.Writer);
+        _logger.LogDebug("Wrote value to virtual dataref {Path}", dataRefPath);
+        return true;
     }
 
     // ========================================================================
@@ -232,24 +298,32 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
     public async Task SetDataRefValueAsync(string dataRefPath, float value)
     {
+        if (TryWriteVirtualValue(dataRefPath, value, typeof(float)))
+            return;
         var (info, index) = await ResolveAndValidateDataRefAsync(dataRefPath, static i => i.IsTypeFloat, "float", supportsArrayIndex: true);
         await SetDataRefValueCoreAsync(info, index, JsonSerializer.SerializeToElement(value));
     }
 
     public async Task SetDataRefValueAsync(string dataRefPath, int value)
     {
+        if (TryWriteVirtualValue(dataRefPath, value, typeof(int)))
+            return;
         var (info, index) = await ResolveAndValidateDataRefAsync(dataRefPath, static i => i.IsTypeInt, "int", supportsArrayIndex: true);
         await SetDataRefValueCoreAsync(info, index, JsonSerializer.SerializeToElement(value));
     }
 
     public async Task SetDataRefValueAsync(string dataRefPath, double value)
     {
+        if (TryWriteVirtualValue(dataRefPath, value, typeof(double)))
+            return;
         var (info, index) = await ResolveAndValidateDataRefAsync(dataRefPath, static i => i.IsTypeDouble, "double", supportsArrayIndex: false);
         await SetDataRefValueCoreAsync(info, index, JsonSerializer.SerializeToElement(value));
     }
 
     public async Task SetDataRefValueAsync(string dataRefPath, string value)
     {
+        if (TryWriteVirtualValue(dataRefPath, value, typeof(string)))
+            return;
         var (info, index) = await ResolveAndValidateDataRefAsync(dataRefPath, static i => i.IsTypeData, "data/string", supportsArrayIndex: false);
         await SetDataRefValueCoreAsync(info, index, JsonSerializer.SerializeToElement(Convert.ToBase64String(Encoding.UTF8.GetBytes(value))));
     }
@@ -400,6 +474,8 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
     public async Task PreResolveDataRefAsync(string dataRefPath)
     {
+        if (_virtualRegistry.IsVirtualPath(dataRefPath)) return;
+
         try
         {
             var (basePath, _) = ParseDataRefPath(dataRefPath);
