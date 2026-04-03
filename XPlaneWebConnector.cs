@@ -380,6 +380,20 @@ public sealed partial class XPlaneWebConnector : IXPlaneWebConnector, IXPlaneApi
 
     public Task SendCommandAsync(string commandPath) => SendCommandAsync(commandPath, duration: 0);
 
+    public async Task BeginCommandAsync(string commandPath)
+    {
+        var id = await ResolveCommandIdAsync(commandPath);
+        await SetCommandActiveAsync(id, true);
+        _logger.LogDebug("Begin command {Name} (id={Id})", commandPath, id);
+    }
+
+    public async Task EndCommandAsync(string commandPath)
+    {
+        var id = await ResolveCommandIdAsync(commandPath);
+        await SetCommandActiveAsync(id, false);
+        _logger.LogDebug("End command {Name} (id={Id})", commandPath, id);
+    }
+
     public async Task SendCommandAsync(string commandPath, float duration)
     {
         if (duration is < 0 or > 10)

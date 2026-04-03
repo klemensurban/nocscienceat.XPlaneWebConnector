@@ -71,6 +71,12 @@ public interface IXPlaneWebConnector : IDisposable
     /// <summary>Sends a one-shot command to X-Plane.</summary>
     Task SendCommandAsync(string commandPath);
 
+    /// <summary>Begins holding a command (press). Call <see cref="EndCommandAsync"/> on release.</summary>
+    Task BeginCommandAsync(string commandPath);
+
+    /// <summary>Releases a held command (release). Pair with <see cref="BeginCommandAsync"/>.</summary>
+    Task EndCommandAsync(string commandPath);
+
     /// <summary>
     /// Sends a command to X-Plane with a specific hold duration (0–10 seconds).
     /// When using <see cref="CommandTransport.HttpPost"/>, this maps directly to

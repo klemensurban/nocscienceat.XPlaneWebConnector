@@ -666,6 +666,10 @@ Using the wrong type for a dataref now throws `InvalidOperationException` with a
 | [XPlaneWebConnector.CallbackChannel.cs.callpath.md](XPlaneWebConnector.CallbackChannel.cs.callpath.md) | Call path diagram for the callback channel (final dispatch to consumers) |
 | [XPlaneWebConnector.Utility.cs.callpath.md](XPlaneWebConnector.Utility.cs.callpath.md) | Call path diagram for utility methods (path parsing, byte decoding) |
 
+### What's New in 3.4.2
+
+- **`BeginCommandAsync` / `EndCommandAsync`** — new methods for explicit command press/release control; pair `BeginCommandAsync` (activate) with `EndCommandAsync` (release) for hold-timing scenarios such as long-press CLR on the MCDU
+
 ### What's New in 3.4.0
 
 - **Writable virtual datarefs** — `SetDataRefValueAsync` now intercepts `xplanewebconnector/` paths and routes to `IVirtualDataRefProvider<T>.OnValueWritten`; writes are dispatched through the callback channel for thread safety
