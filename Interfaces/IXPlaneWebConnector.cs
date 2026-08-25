@@ -1,4 +1,4 @@
-using nocscienceat.XPlaneWebConnector.Models;
+﻿using nocscienceat.XPlaneWebConnector.Models;
 using nocscienceat.XPlaneWebConnector.VirtualDataRefs;
 
 namespace nocscienceat.XPlaneWebConnector.Interfaces;
@@ -78,7 +78,7 @@ public interface IXPlaneWebConnector : IDisposable
     Task EndCommandAsync(string commandPath);
 
     /// <summary>
-    /// Sends a command to X-Plane with a specific hold duration (0�10 seconds).
+    /// Sends a command to X-Plane with a specific hold duration (0–10 seconds).
     /// When using <see cref="CommandTransport.HttpPost"/>, this maps directly to
     /// POST /command/{id}/activate with the given duration.
     /// When using <see cref="CommandTransport.WebSocket"/>, a duration of 0 sends
